@@ -68,7 +68,7 @@ unsandboxed).
 ## Contract: Gmail reader
 
 `App/Mail/GmailIMAP.swift`: read-only IMAP over TLS to imap.gmail.com:993 with the user's address and a Google
-app password (kept in the Keychain). `GmailIMAPClient.fetch(query:sinceUID:since:limit:)` runs
+app password (kept in the Keychain). `GmailIMAPClient.fetch(query:sinceUID:uidValidity:limit:)` runs
 `UID SEARCH X-GM-RAW` in `[Gmail]/All Mail` and returns `MailMessage { uid, date, from, subject, text }`
 with MIME decoded to plain text. The app passes the text to the same parser as SMS.
 

@@ -153,16 +153,64 @@ enum Diag {
         }
     }
 
+    /// A picture of the screen. drawHierarchy came back empty on the phone (platform app), so other ways are tried
+    /// in turn and the log says which one worked.
     @MainActor
     static func snapshot(_ name: String) {
         let scenes = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }
         let windows = scenes.flatMap { $0.windows }.filter { !$0.isHidden }.sorted { $0.windowLevel.rawValue < $1.windowLevel.rawValue }
         guard let key = windows.first(where: { $0.isKeyWindow }) ?? windows.first else { log("snapshot: no window"); return }
-        let r = UIGraphicsImageRenderer(bounds: key.bounds)
-        let img = r.image { _ in for w in windows { w.drawHierarchy(in: w.frame, afterScreenUpdates: true) } }
+        let format = UIGraphicsImageRendererFormat.default()
+        format.opaque = true
+        let r = UIGraphicsImageRenderer(bounds: key.bounds, format: format)
+        var how = "screen"
+        var img: UIImage? = screenImage()
+        if img == nil || isBlank(img!) {
+            var drew = false
+            img = r.image { ctx in
+                UIColor.black.setFill(); ctx.fill(key.bounds)
+                for w in windows { drew = w.drawHierarchy(in: w.frame, afterScreenUpdates: true) || drew }
+            }
+            how = "drawHierarchy(\(drew))"
+        }
+        if let i = img, isBlank(i) {
+            img = r.image { ctx in
+                UIColor.black.setFill(); ctx.fill(key.bounds)
+                for w in windows {
+                    ctx.cgContext.saveGState()
+                    ctx.cgContext.translateBy(x: w.frame.minX, y: w.frame.minY)
+                    w.layer.render(in: ctx.cgContext)
+                    ctx.cgContext.restoreGState()
+                }
+            }
+            how = "layer.render"
+        }
         let u = Paths.caches.appendingPathComponent("kb-snap-\(name).png")
-        try? img.pngData()?.write(to: u)
-        log("snapshot \(u.lastPathComponent) \(Int(key.bounds.width))x\(Int(key.bounds.height))")
+        try? img?.pngData()?.write(to: u)
+        log("snapshot \(u.lastPathComponent) \(Int(key.bounds.width))x\(Int(key.bounds.height)) via \(how) blank=\(img.map { isBlank($0) } ?? true)")
+    }
+
+    /// UIKit's own screen capture (`_UICreateScreenUIImage`, a +1 UIImage), looked up at run time.
+    private static func screenImage() -> UIImage? {
+        guard let sym = dlsym(UnsafeMutableRawPointer(bitPattern: -2), "_UICreateScreenUIImage") else { return nil }
+        typealias Fn = @convention(c) () -> Unmanaged<UIImage>?
+        return unsafeBitCast(sym, to: Fn.self)()?.takeRetainedValue()
+    }
+
+    /// True when a grid of sample pixels is all one colour (nothing was drawn).
+    private static func isBlank(_ img: UIImage) -> Bool {
+        guard let cg = img.cgImage, let data = cg.dataProvider?.data, let p = CFDataGetBytePtr(data) else { return true }
+        let bpr = cg.bytesPerRow, bpp = max(1, cg.bitsPerPixel / 8)
+        var first: [UInt8]?
+        for gy in 1..<12 {
+            for gx in 1..<8 {
+                let x = cg.width * gx / 8, y = cg.height * gy / 12
+                let o = y * bpr + x * bpp
+                let px = Array(UnsafeBufferPointer(start: p + o, count: min(bpp, 4)))
+                if first == nil { first = px } else if px != first { return false }
+            }
+        }
+        return true
     }
 }
 

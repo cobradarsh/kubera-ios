@@ -154,6 +154,24 @@ enum MessageParser {
 
         if let reason = lookalikeReason(text) { return [.ignored(reason)] }
 
+        // Notifications and mail carry news and adverts with rupee amounts ("FIIs buy ₹1,634.33 Cr").
+        if m.source != .sms {
+            if marketNewsRx.test(text) { return [.ignored("market news")] }
+            if brokerApps.contains(m.sender.lowercased()) {
+                // From a broker app only money moved in or out of the trading account counts (an investment;
+                // the bank's own SMS of the same transfer is the record, this one becomes its repeat).
+                guard brokerFundsRx.test(text), let g = moneyRx.match(text), let amt = amount(g[1]), amt > 0 else {
+                    return [.ignored("broker app notification")]
+                }
+                let out = brokerOutRx.test(text)
+                return [.txn(ParsedTxn(amount: amt, direction: out ? .credit : .debit, instrument: .account, bank: nil, last4: nil,
+                                       counterparty: brokerAppNames[m.sender.lowercased()] ?? "Broker", vpa: nil, ref: nil,
+                                       balanceAfter: nil, when: nil, isPrimary: false, hint: out ? .brokerPayout : .brokerFunding,
+                                       pattern: "broker-app"))]
+            }
+            guard paymentPhraseRx.test(text) else { return [.ignored("no payment words")] }
+        }
+
         // Who may create a transaction through the generic reader: banks, payment/broker senders, app
         // notifications and mail; other SMS (shops confirming an order) only when they name an account at a bank.
         let isBankSender = info.code.map { bankCodes[$0] != nil } ?? false
@@ -163,7 +181,8 @@ enum MessageParser {
             return [.ignored("not a bank or payment sender")]
         }
         let trusted = m.source != .sms || isBankSender || isFinanceSender
-        if var t = generic(text, trusted: trusted) {
+        // "Cr" / "Dr" mean credit / debit only in a bank's own SMS; elsewhere "Cr" is usually crore.
+        if var t = generic(text, trusted: trusted, abbreviations: m.source == .sms && isBankSender) {
             if t.bank == nil { t.bank = bank }
             // Only a bank's own SMS is the record of a payment; everything else confirms one.
             if m.source != .sms || !isBankSender { t.isPrimary = false }
@@ -532,8 +551,22 @@ enum MessageParser {
     // MARK: Generic reader for other banks and payment apps
 
     private static let moneyRx = Rx(#"(?:Rs\.?|INR)\s*:?\s*([0-9][0-9,]*(?:\.[0-9]+)?)"#)
-    private static let debitWordRx = Rx(#"\b(debited|debit(?! card)|spent|sent|paid|withdrawn|withdrawal|deducted|purchase[d]?|charged|txn of|transaction of|used at|used for|transferred to|dr\b)"#)
-    private static let creditWordRx = Rx(#"\b(credited|credit(?! card)(?! limit)|received|deposited|refund(?:ed)?|reversed|reversal|cashback|cr\b)"#)
+    private static let debitWordRx = Rx(#"\b(debited|debit(?! card)|spent|sent|paid|withdrawn|withdrawal|deducted|purchase[d]?|charged|txn of|transaction of|used at|used for|transferred to)"#)
+    private static let creditWordRx = Rx(#"\b(credited|credit(?! card)(?! limit)|received|deposited|refund(?:ed)?|reversed|reversal|cashback)"#)
+    private static let debitAbbrevRx = Rx(#"\bdr\b"#)
+    private static let creditAbbrevRx = Rx(#"\bcr\b"#)
+
+    /// Market news and adverts that broker and bank apps push with rupee amounts in them.
+    private static let marketNewsRx = Rx(#"\b(fiis?|diis?|net (?:inflow|outflow)|market (?:update|wrap|cap)|ipo|gmp|sensex|nifty|bank ?nifty|nasdaq|dow jones|crores?|lakh crore|\d[\d,.]*\s?cr)\b"#)
+    /// Words without which a notification or mail is not a payment.
+    private static let paymentPhraseRx = Rx(#"\b(paid|sent|received|debited|credited|spent|withdrawn|deducted|refund(?:ed)?|payment (?:of|successful|done|received)|transferred|txn|transaction)\b"#)
+    private static let brokerOutRx = Rx(#"\b(withdraw\w*|payout|settlement|transferred to your bank|credited to your bank)\b"#)
+    private static let brokerFundsRx = Rx(#"\b(funds?|amount|money)\b.*\b(added|withdrawn|credited|debited|transferred|received|payout)\b|\bpayout\b|\bwithdrawal\b.*\b(processed|successful|completed)\b"#)
+    static let brokerApps: Set<String> = ["com.dhan.live", "com.zerodha.kite3", "com.kotak.neo", "in.upstox.pro", "in.upstox.app",
+                                          "com.upstox.pro", "com.nextbillion.groww", "com.groww.app", "in.groww.app", "com.msf.angelmobile",
+                                          "com.angelbroking.angelmobile", "com.angelone.app"]
+    private static let brokerAppNames: [String: String] = ["com.dhan.live": "Dhan", "com.zerodha.kite3": "Zerodha", "com.kotak.neo": "Kotak Securities",
+                                                            "in.upstox.pro": "Upstox", "com.nextbillion.groww": "Groww", "com.msf.angelmobile": "Angel One"]
     private static let contextRx = Rx(#"\b(a/c|acct|account|card|upi|vpa|bank|imps|neft|rtgs|wallet|atm|txn|transaction|ref)\b"#)
     private static let cardLast4Rx = Rx(#"(?:credit card|debit card|card|cc|dc)\s*(?:no\.?|number)?\s*(?:ending(?: with)?|xx|x|\*+)?\s*[x*]*\s*(\d{4})\b"#)
     private static let acctLast4Rx = Rx(#"(?:a/c|acct|account|ac)\.?\s*(?:no\.?|number)?\s*[:.]?\s*[x*]*\s*(\d{3,6})\b"#)
@@ -550,7 +583,7 @@ enum MessageParser {
     private static let balRx = Rx(#"(?:avl\.?\s*bal(?:ance)?|available\s*bal(?:ance)?|\bbal(?:ance)?\b)\s*(?:is|:|-)?\s*(?:Rs\.?|INR)?\s*:?\s*(-?[0-9][0-9,]*(?:\.[0-9]+)?)"#)
     private static let notPayeeWords: Set<String> = ["your", "you", "a/c", "account", "acct", "card", "beneficiary", "the", "this", "bank", "upi", "vpa", "self", "mobile", "rs", "inr"]
 
-    static func generic(_ text: String, trusted: Bool) -> ParsedTxn? {
+    static func generic(_ text: String, trusted: Bool, abbreviations: Bool = false) -> ParsedTxn? {
         guard trusted || contextRx.test(text) else { return nil }
         let ns = text as NSString
         // Amounts that are not balances or limits.
@@ -565,8 +598,12 @@ enum MessageParser {
         }
         guard let value = amt else { return nil }
 
-        let d = debitWordRx.matchRanges(text).first?.range.location
-        let c = creditWordRx.matchRanges(text).first?.range.location
+        var d = debitWordRx.matchRanges(text).first?.range.location
+        var c = creditWordRx.matchRanges(text).first?.range.location
+        if abbreviations {
+            if d == nil { d = debitAbbrevRx.matchRanges(text).first?.range.location }
+            if c == nil { c = creditAbbrevRx.matchRanges(text).first?.range.location }
+        }
         let direction: TxnDirection
         switch (d, c) {
         case let (x?, y?): direction = x <= y ? .debit : .credit
