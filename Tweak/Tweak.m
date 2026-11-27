@@ -199,7 +199,7 @@ static NSSet<NSString *> *KLDefaultApps(void) {
     static dispatch_once_t once;
     dispatch_once(&once, ^{
         NSArray<NSString *> *ids = @[
-            // installed on the phone (seen 2026-11-27)
+            // common Indian payment, bank, broker, telecom and mail apps
             @"com.google.paisa",                        // Google Pay
             @"in.org.npci.ios.upiapp",                  // BHIM
             @"com.amazon.AmazonIN",                     // Amazon India, Amazon Pay
@@ -210,7 +210,7 @@ static NSSet<NSString *> *KLDefaultApps(void) {
             @"com.jio.myjio",                           // MyJio
             @"com.google.Gmail",                        // mail
             @"com.apple.mobilemail",                    // mail
-            // well known, not on the phone now. Some ids are best guesses: a wrong one costs nothing.
+            // more of the same; some ids are best guesses: a wrong one costs nothing.
             @"com.microsoft.Office.Outlook",            // mail
             @"com.phonepe.PhonePeApp",                  // PhonePe
             @"net.one97.paytm",                         // Paytm
