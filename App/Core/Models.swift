@@ -125,18 +125,18 @@ struct Txn: Identifiable, Codable, Hashable {
         amount = try c.decode(Double.self, forKey: .amount)
         direction = try c.decode(TxnDirection.self, forKey: .direction)
         category = try c.decodeIfPresent(String.self, forKey: .category) ?? Category.uncategorized
-        categorySource = try c.decodeIfPresent(CategorySource.self, forKey: .categorySource) ?? .none
+        categorySource = (try? c.decodeIfPresent(CategorySource.self, forKey: .categorySource)) ?? .none
         counterparty = try c.decodeIfPresent(String.self, forKey: .counterparty) ?? ""
         counterpartyKey = try c.decodeIfPresent(String.self, forKey: .counterpartyKey) ?? ""
         vpa = try c.decodeIfPresent(String.self, forKey: .vpa)
-        instrument = try c.decodeIfPresent(Instrument.self, forKey: .instrument) ?? .unknown
+        instrument = (try? c.decodeIfPresent(Instrument.self, forKey: .instrument)) ?? .unknown
         bank = try c.decodeIfPresent(String.self, forKey: .bank)
         last4 = try c.decodeIfPresent(String.self, forKey: .last4)
         ref = try c.decodeIfPresent(String.self, forKey: .ref)
         balanceAfter = try c.decodeIfPresent(Double.self, forKey: .balanceAfter)
         note = try c.decodeIfPresent(String.self, forKey: .note)
         raw = try c.decodeIfPresent(String.self, forKey: .raw) ?? ""
-        source = try c.decodeIfPresent(TxnSource.self, forKey: .source) ?? .sms
+        source = (try? c.decodeIfPresent(TxnSource.self, forKey: .source)) ?? .sms
         sender = try c.decodeIfPresent(String.self, forKey: .sender)
         duplicateOf = try c.decodeIfPresent(String.self, forKey: .duplicateOf)
         isPrimary = try c.decodeIfPresent(Bool.self, forKey: .isPrimary) ?? true
@@ -144,8 +144,8 @@ struct Txn: Identifiable, Codable, Hashable {
         isPerson = try c.decodeIfPresent(Bool.self, forKey: .isPerson) ?? false
         suggestion = try c.decodeIfPresent(String.self, forKey: .suggestion)
         suggestionNote = try c.decodeIfPresent(String.self, forKey: .suggestionNote)
-        lookupState = try c.decodeIfPresent(LookupState.self, forKey: .lookupState) ?? .none
-        hint = try c.decodeIfPresent(TxnHint.self, forKey: .hint) ?? .none
+        lookupState = (try? c.decodeIfPresent(LookupState.self, forKey: .lookupState)) ?? .none
+        hint = (try? c.decodeIfPresent(TxnHint.self, forKey: .hint)) ?? .none
         pattern = try c.decodeIfPresent(String.self, forKey: .pattern)
         createdAt = try c.decodeIfPresent(Date.self, forKey: .createdAt) ?? Date()
     }
@@ -174,6 +174,8 @@ struct Category: Identifiable, Codable, Hashable {
     var colorHex: String
     var kind: CategoryKind
     var builtIn: Bool = true
+
+    fileprivate enum CodingKeys: String, CodingKey { case id, name, symbol, colorHex, kind, builtIn }
 
     static let uncategorized = "uncategorized"
     static let people = "people"
@@ -218,6 +220,8 @@ struct Rule: Identifiable, Codable, Hashable {
     var label: String
     var created: Date = Date()
     var hits: Int = 0
+
+    fileprivate enum CodingKeys: String, CodingKey { case key, category, label, created, hits }
 }
 
 // MARK: - Balances, trading, net worth
@@ -246,6 +250,10 @@ struct AccountBalance: Identifiable, Codable, Hashable {
     var nickname: String?
     var includeInNetWorth: Bool = true
     var history: [BalancePoint] = []
+
+    fileprivate enum CodingKeys: String, CodingKey {
+        case id, institution, last4, kind, balance, asOf, nickname, includeInNetWorth, history
+    }
 
     var title: String {
         if let n = nickname, !n.isEmpty { return n }
@@ -296,6 +304,8 @@ struct TradeDay: Identifiable, Codable, Hashable {
     var source: TradeSource = .manual
     var assetId: String?      // Photos local identifier of the screenshot
     var addedAt: Date = Date()
+
+    fileprivate enum CodingKeys: String, CodingKey { case id, date, broker, pnl, charges, positions, note, source, assetId, addedAt }
 
     var net: Double { pnl - (charges ?? 0) }
     static func key(_ date: Date, _ broker: String) -> String { Cal.dayKey(date) + "|" + broker }
@@ -358,6 +368,8 @@ struct ManualItem: Identifiable, Codable, Hashable {
     var value: Double
     var updated: Date = Date()
     var note: String?
+
+    fileprivate enum CodingKeys: String, CodingKey { case id, name, kind, value, updated, note }
 }
 
 struct NetWorthSnapshot: Identifiable, Codable, Hashable {
@@ -377,3 +389,75 @@ struct Holiday: Identifiable, Codable, Hashable {
 }
 
 enum HolidayKind: String, Codable { case nse, india, special }
+
+// MARK: - Reading saved files written by older (or newer) builds
+//
+// Swift's automatic decoding needs every non-optional field, even one with a default value, so a field added in a later
+// build would make the whole saved file unreadable. These readers fill in what is missing instead. Written as
+// extensions so the structs keep their memberwise initialisers.
+
+extension Category {
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decode(String.self, forKey: .id)
+        name = try c.decodeIfPresent(String.self, forKey: .name) ?? id
+        symbol = try c.decodeIfPresent(String.self, forKey: .symbol) ?? "tag.fill"
+        colorHex = try c.decodeIfPresent(String.self, forKey: .colorHex) ?? "#9E9E9E"
+        kind = (try? c.decodeIfPresent(CategoryKind.self, forKey: .kind)) ?? .expense
+        builtIn = try c.decodeIfPresent(Bool.self, forKey: .builtIn) ?? false
+    }
+}
+
+extension Rule {
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        key = try c.decode(String.self, forKey: .key)
+        category = try c.decode(String.self, forKey: .category)
+        label = try c.decodeIfPresent(String.self, forKey: .label) ?? key
+        created = try c.decodeIfPresent(Date.self, forKey: .created) ?? Date()
+        hits = try c.decodeIfPresent(Int.self, forKey: .hits) ?? 0
+    }
+}
+
+extension AccountBalance {
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decode(String.self, forKey: .id)
+        institution = try c.decodeIfPresent(String.self, forKey: .institution) ?? id
+        last4 = try c.decodeIfPresent(String.self, forKey: .last4)
+        kind = (try? c.decodeIfPresent(AccountKind.self, forKey: .kind)) ?? .savings
+        balance = try c.decode(Double.self, forKey: .balance)
+        asOf = try c.decodeIfPresent(Date.self, forKey: .asOf) ?? Date(timeIntervalSince1970: 0)
+        nickname = try c.decodeIfPresent(String.self, forKey: .nickname)
+        includeInNetWorth = try c.decodeIfPresent(Bool.self, forKey: .includeInNetWorth) ?? true
+        history = (try? c.decodeIfPresent([BalancePoint].self, forKey: .history)) ?? []
+    }
+}
+
+extension TradeDay {
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decode(String.self, forKey: .id)
+        date = try c.decode(Date.self, forKey: .date)
+        broker = try c.decodeIfPresent(String.self, forKey: .broker) ?? "Other"
+        pnl = try c.decode(Double.self, forKey: .pnl)
+        charges = try c.decodeIfPresent(Double.self, forKey: .charges)
+        positions = (try? c.decodeIfPresent([PositionPnL].self, forKey: .positions)) ?? []
+        note = try c.decodeIfPresent(String.self, forKey: .note)
+        source = (try? c.decodeIfPresent(TradeSource.self, forKey: .source)) ?? .manual
+        assetId = try c.decodeIfPresent(String.self, forKey: .assetId)
+        addedAt = try c.decodeIfPresent(Date.self, forKey: .addedAt) ?? date
+    }
+}
+
+extension ManualItem {
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decodeIfPresent(String.self, forKey: .id) ?? UUID().uuidString
+        name = try c.decode(String.self, forKey: .name)
+        kind = (try? c.decodeIfPresent(AssetKind.self, forKey: .kind)) ?? .otherAsset
+        value = try c.decode(Double.self, forKey: .value)
+        updated = try c.decodeIfPresent(Date.self, forKey: .updated) ?? Date()
+        note = try c.decodeIfPresent(String.self, forKey: .note)
+    }
+}

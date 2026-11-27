@@ -83,12 +83,25 @@ enum Holidays {
 
     /// The trading day a screenshot taken at `date` belongs to: before 09:00, or on a closed day, it is the
     /// previous trading day's result.
-    static func tradingDay(forScreenshotAt date: Date, extra: [Holiday] = []) -> Date {
+    ///
+    /// `commodity`: the screen shows MCX contracts. MCX's evening session (17:00 to about 23:55) also runs on most NSE
+    /// weekday holidays, so an evening screenshot on such a day, or one taken before 09:00 the next morning, belongs
+    /// to that day.
+    static func tradingDay(forScreenshotAt date: Date, extra: [Holiday] = [], commodity: Bool = false) -> Date {
         let day = Cal.startOfDay(date)
+        if commodity {
+            let early = Cal.hour(date) < 9
+            let session = early ? Cal.addDays(-1, to: day) : day
+            if isTradingDay(session, extra: extra) { return session }
+            if isWeekday(session) && (early || Cal.hour(date) >= 17) { return session }
+            return previousTradingDay(before: session, extra: extra)
+        }
         if Cal.hour(date) < 9 { return previousTradingDay(before: day, extra: extra) }
         if isTradingDay(day, extra: extra) { return day }
         return previousTradingDay(before: day, extra: extra)
     }
+
+    static func isWeekday(_ date: Date) -> Bool { Cal.weekdayMon(date) < 6 }
 
     /// Market status line for the header.
     static func marketStatus(at now: Date = Date(), extra: [Holiday] = []) -> String {

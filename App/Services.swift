@@ -4,6 +4,7 @@ import UserNotifications
 import LocalAuthentication
 import Photos
 import Vision
+import ImageIO
 import BackgroundTasks
 
 // MARK: - The 22:00 check-in, badge and budget alerts
@@ -21,36 +22,44 @@ enum Reminders {
         c.setNotificationCategories([UNNotificationCategory(identifier: checkinCategory, actions: [sort], intentIdentifiers: [], options: [])])
     }
 
-    /// Replaces the daily check-in with one whose text says what is waiting, and sets the app badge.
+    /// Schedules the next seven check-ins and sets the app badge. Only a check-in later today can know what will be
+    /// waiting, so it alone carries the count and the P&L reminder; the others use plain text (every refresh, from
+    /// the app or a background sync, writes them again).
     @MainActor
     static func refresh(store: Store) {
         let count = store.uncategorized.count
-        let today = Cal.startOfDay(Date())
+        let now = Date()
+        let today = Cal.startOfDay(now)
         let tradedToday = store.state.turnovers.values.contains { Cal.sameDay($0.date, today) }
         let recordedToday = store.state.trades.values.contains { Cal.sameDay($0.date, today) }
         let tradeLine = Holidays.isTradingDay(today, extra: store.state.userHolidays) && tradedToday && !recordedToday
             ? " Today's P&L screenshot is not in yet." : ""
-
-        let content = UNMutableNotificationContent()
-        content.title = "🙏 Evening check-in"
-        if count == 0 {
-            content.body = "All expenses are sorted." + tradeLine + " Shubham bhavatu."
-        } else {
-            content.body = "\(count) expense\(count == 1 ? "" : "s") to sort." + tradeLine + " Tap to sort them now."
-        }
-        content.sound = .default
-        content.categoryIdentifier = checkinCategory
-        content.userInfo = ["link": "kubera://checkin"]
         let hour = Pref.d.integer(forKey: Pref.checkinHour)
         let minute = Pref.d.integer(forKey: Pref.checkinMinute)
-        var dc = DateComponents()
-        dc.hour = hour
-        dc.minute = minute
-        dc.timeZone = Cal.ist
-        let trigger = UNCalendarNotificationTrigger(dateMatching: dc, repeats: true)
         let center = UNUserNotificationCenter.current()
-        center.removePendingNotificationRequests(withIdentifiers: [checkinID])
-        center.add(UNNotificationRequest(identifier: checkinID, content: content, trigger: trigger))
+        let ids = (0..<7).map { "\(checkinID).\($0)" }
+        center.removePendingNotificationRequests(withIdentifiers: [checkinID] + ids)
+        guard var first = Cal.make(Cal.year(now), Cal.month(now), Cal.day(now), hour, minute) else { return }
+        if first <= now { first = Cal.addDays(1, to: first) }
+        for i in 0..<7 {
+            let at = Cal.addDays(i, to: first)
+            let content = UNMutableNotificationContent()
+            content.title = "🙏 Evening check-in"
+            if i == 0 && Cal.sameDay(at, now) {
+                content.body = count == 0
+                    ? "All expenses are sorted." + tradeLine + " Shubham bhavatu."
+                    : "\(count) expense\(count == 1 ? "" : "s") to sort." + tradeLine + " Tap to sort them now."
+            } else {
+                content.body = "Time to sort the day's payments. Tap to open the check-in."
+            }
+            content.sound = .default
+            content.categoryIdentifier = checkinCategory
+            content.userInfo = ["link": "kubera://checkin"]
+            var dc = Cal.cal.dateComponents([.year, .month, .day, .hour, .minute], from: at)
+            dc.timeZone = Cal.ist
+            center.add(UNNotificationRequest(identifier: ids[i], content: content,
+                                             trigger: UNCalendarNotificationTrigger(dateMatching: dc, repeats: false)))
+        }
         UIApplication.shared.applicationIconBadgeNumber = count
     }
 
@@ -130,6 +139,8 @@ struct ScreenshotFinding: Identifiable {
     var image: UIImage
     var reading: TradeReading
     var tradingDay: Date
+    /// False when the picture's date was not available, so the trading day is a guess.
+    var dateKnown = true
 }
 
 enum ScreenshotScanner {
@@ -143,14 +154,20 @@ enum ScreenshotScanner {
         return s == .authorized || s == .limited
     }
 
+    struct ScanResult {
+        var findings: [ScreenshotFinding] = []
+        /// Screenshots that were read and are not broker screens, so they need not be read again.
+        var examined: [String] = []
+    }
+
     /// Pictures taken since `since` that are screenshots (tagged so by iOS, or exactly the size of this screen:
     /// screenshots saved by tweaks are not always tagged) and look like a broker's positions or holdings screen.
-    static func scan(since: Date, skip: Set<String>, holidays: [Holiday], limit: Int = 40) async -> [ScreenshotFinding] {
-        guard authorized() else { return [] }
+    /// Screenshots in `skip` (already read or reviewed) are passed over before the limit is counted.
+    static func scan(since: Date, skip: Set<String>, holidays: [Holiday], limit: Int = 25) async -> ScanResult {
+        guard authorized() else { return ScanResult() }
         let opts = PHFetchOptions()
         opts.predicate = NSPredicate(format: "creationDate > %@", since as NSDate)
         opts.sortDescriptors = [NSSortDescriptor(key: "creationDate", ascending: false)]
-        opts.fetchLimit = 200
         let assets = PHAsset.fetchAssets(with: .image, options: opts)
         let screen = await MainActor.run { UIScreen.main.nativeBounds.size }
         let sw = Int(min(screen.width, screen.height)), sh = Int(max(screen.width, screen.height))
@@ -162,18 +179,46 @@ enum ScreenshotScanner {
             if tagged || screenSized { list.append(a) }
             if list.count >= limit { stop.pointee = true }
         }
-        Diag.log("screenshot scan: \(assets.count) pictures since \(since), \(list.count) screenshots to read")
-        var out: [ScreenshotFinding] = []
+        Diag.log("screenshot scan: \(assets.count) pictures since \(since), \(list.count) new screenshots to read")
+        var result = ScanResult()
         for a in list {
             guard let img = await image(for: a) else { Diag.log("  \(a.localIdentifier.prefix(8)) no image"); continue }
-            let reading = await read(img)
-            Diag.log("  \(a.localIdentifier.prefix(8)) \(a.pixelWidth)x\(a.pixelHeight) broker=\(reading.broker ?? "-") kind=\(reading.kind.rawValue) total=\(reading.total.map { String($0) } ?? "-") conf=\(String(format: "%.2f", reading.confidence))")
-            guard reading.kind != .unknown || reading.broker != nil, reading.total != nil || reading.currentValue != nil else { continue }
+            let t0 = Date()
+            let lines = await recognize(img)
+            let reading = TradeOCRParser.read(lines)
+            Diag.log("  \(a.localIdentifier.prefix(8)) \(a.pixelWidth)x\(a.pixelHeight) lines=\(lines.count) \(Int(Date().timeIntervalSince(t0) * 1000)) ms broker=\(reading.broker ?? "-") kind=\(reading.kind.rawValue) total=\(reading.total.map { String($0) } ?? "-") conf=\(String(format: "%.2f", reading.confidence))")
+            guard reading.kind != .unknown || reading.broker != nil, reading.total != nil || reading.currentValue != nil else {
+                // Not a broker screen. Only remembered when text was read, so a failed read is tried again later.
+                if !lines.isEmpty { result.examined.append(a.localIdentifier) }
+                continue
+            }
             let created = a.creationDate ?? Date()
-            out.append(ScreenshotFinding(assetID: a.localIdentifier, created: created, image: img, reading: reading,
-                                         tradingDay: Holidays.tradingDay(forScreenshotAt: created, extra: holidays)))
+            result.findings.append(ScreenshotFinding(assetID: a.localIdentifier, created: created, image: img, reading: reading,
+                                                     tradingDay: Holidays.tradingDay(forScreenshotAt: created, extra: holidays, commodity: reading.commodity),
+                                                     dateKnown: a.creationDate != nil))
         }
-        return out
+        return result
+    }
+
+    /// When a picture was taken, from its own metadata (for pictures the photo library could not be asked about).
+    static func takenDate(in data: Data) -> Date? {
+        guard let src = CGImageSourceCreateWithData(data as CFData, nil),
+              let props = CGImageSourceCopyPropertiesAtIndex(src, 0, nil) as? [CFString: Any] else { return nil }
+        let exif = props[kCGImagePropertyExifDictionary] as? [CFString: Any]
+        let tiff = props[kCGImagePropertyTIFFDictionary] as? [CFString: Any]
+        let png = props[kCGImagePropertyPNGDictionary] as? [CFString: Any]
+        let candidates: [Any?] = [exif?[kCGImagePropertyExifDateTimeOriginal], exif?[kCGImagePropertyExifDateTimeDigitized],
+                                  tiff?[kCGImagePropertyTIFFDateTime], png?[kCGImagePropertyPNGCreationTime]]
+        let f = DateFormatter()
+        f.locale = Locale(identifier: "en_US_POSIX")
+        f.timeZone = .current   // EXIF times carry no zone: they are the phone's local time
+        for case let raw as String in candidates.compactMap({ $0 }) {
+            for format in ["yyyy:MM:dd HH:mm:ss", "yyyy-MM-dd'T'HH:mm:ssZZZZZ", "yyyy-MM-dd HH:mm:ss"] {
+                f.dateFormat = format
+                if let d = f.date(from: raw) { return d }
+            }
+        }
+        return nil
     }
 
     static func image(for asset: PHAsset) async -> UIImage? {
@@ -196,28 +241,19 @@ enum ScreenshotScanner {
     }
 
     static func recognize(_ image: UIImage) async -> [OCRLine] {
-        guard let cg = image.cgImage else { return [] }
-        return await withCheckedContinuation { cont in
-            DispatchQueue.global(qos: .userInitiated).async {
-                let req = VNRecognizeTextRequest()
-                req.recognitionLevel = .accurate
-                req.usesLanguageCorrection = false
-                req.recognitionLanguages = ["en-US"]
-                let handler = VNImageRequestHandler(cgImage: cg, orientation: .up)
-                var lines: [OCRLine] = []
-                if (try? handler.perform([req])) != nil {
-                    let pixels = PixelSampler(cg)
-                    for o in req.results ?? [] {
-                        guard let top = o.topCandidates(1).first else { continue }
-                        let b = o.boundingBox // origin bottom-left, normalised
-                        var line = OCRLine(text: top.string, x: Double(b.minX), y: Double(1 - b.maxY), w: Double(b.width), h: Double(b.height))
-                        line.tint = pixels?.tint(in: b) ?? 0
-                        lines.append(line)
-                    }
-                }
-                cont.resume(returning: lines)
-            }
-        }
+        guard let cg = bitmap(of: image) else { Diag.log("text reader: picture has no bitmap"); return [] }
+        return await TextReader.lines(in: cg)
+    }
+
+    /// The picture's bitmap, upright. Drawn afresh when the picture has none or is stored turned.
+    static func bitmap(of image: UIImage) -> CGImage? {
+        if image.imageOrientation == .up, let cg = image.cgImage { return cg }
+        let size = CGSize(width: image.size.width * image.scale, height: image.size.height * image.scale)
+        guard size.width >= 1, size.height >= 1 else { return nil }
+        let f = UIGraphicsImageRendererFormat()
+        f.scale = 1
+        f.opaque = true
+        return UIGraphicsImageRenderer(size: size, format: f).image { _ in image.draw(in: CGRect(origin: .zero, size: size)) }.cgImage
     }
 }
 

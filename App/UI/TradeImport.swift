@@ -16,7 +16,7 @@ struct ScreenshotReviewView: View {
                                   detail: "Take a screenshot of your broker's positions (or holdings) screen; it shows up here.")
                     }
                     ForEach(findings) { f in
-                        FindingCard(finding: f) { saved in
+                        FindingCard(finding: f, usualBroker: store.usualBroker) { saved in
                             store.markSeenAssets([f.assetID])
                             findings.removeAll { $0.assetID == f.assetID }
                             if saved { Haptic.success() }
@@ -44,12 +44,16 @@ struct FindingCard: View {
     @State private var charges = ""
     @State private var asHoldings: Bool
     @State private var zoom = false
+    @State private var confirmReplace = false
 
-    init(finding: ScreenshotFinding, done: @escaping (Bool) -> Void) {
+    init(finding: ScreenshotFinding, usualBroker: String, done: @escaping (Bool) -> Void) {
         self.finding = finding
         self.done = done
         _day = State(initialValue: finding.tradingDay)
-        _broker = State(initialValue: finding.reading.broker ?? "Dhan")
+        // A screen that names no broker the picker knows (or names an analytics app such as Sensibull) starts on the
+        // broker most days are saved under; the card says so.
+        let read = finding.reading.broker.flatMap { Brokers.all.contains($0) ? $0 : nil }
+        _broker = State(initialValue: read ?? usualBroker)
         let r = finding.reading
         let holdings = r.kind == .holdings
         _asHoldings = State(initialValue: holdings)
@@ -72,6 +76,7 @@ struct FindingCard: View {
                     Text("Taken " + Cal.fullFormatter.string(from: finding.created)).font(.caption).foregroundColor(Theme.dim)
                     Pill(text: String(format: "%.0f%% sure", r.confidence * 100), color: r.confidence >= 0.7 ? Theme.profit : .orange)
                     ForEach(r.notes, id: \.self) { n in Text("• " + n).font(.caption2).foregroundColor(Theme.faint) }
+                    ForEach(warnings, id: \.self) { w in Text(w).font(.caption2).foregroundColor(.orange) }
                     if !r.positions.isEmpty {
                         Text("\(r.positions.count) position rows read").font(.caption2).foregroundColor(Theme.dim)
                     }
@@ -90,14 +95,19 @@ struct FindingCard: View {
                 TextField("P&L ₹ (minus for a loss)", text: $amount).keyboardType(.numbersAndPunctuation).font(.title3.weight(.semibold))
                     .foregroundColor(Theme.pnl(Money.parse(amount) ?? 0))
                 TextField("Charges ₹ (optional)", text: $charges).keyboardType(.decimalPad)
+                if let e = existing {
+                    Text("Replaces \(Money.signed(e.pnl)) already saved for \(Cal.dayTitleFormatter.string(from: e.date)) at \(e.broker).")
+                        .font(.caption).foregroundColor(.orange)
+                }
             }
             Picker("Broker", selection: $broker) {
-                ForEach(["Dhan", "Kite", "Kotak Neo", "Upstox", "Groww", "Angel One", "ICICI Direct", "Fyers", "5paisa", "Other"], id: \.self) { Text($0).tag($0) }
+                ForEach(Brokers.all, id: \.self) { Text($0).tag($0) }
             }
             HStack {
                 Button("Not a P&L screen") { done(false) }.buttonStyle(.bordered).tint(Theme.dim)
                 Spacer()
                 Button {
+                    if !asHoldings && existing != nil { confirmReplace = true; return }
                     save()
                     done(true)
                 } label: { Label("Save", systemImage: "checkmark").frame(minWidth: 90) }
@@ -109,6 +119,36 @@ struct FindingCard: View {
         .sheet(isPresented: $zoom) {
             ScrollView { Image(uiImage: finding.image).resizable().scaledToFit() }.background(Color.black)
         }
+        .confirmationDialog("Replace the saved P&L?", isPresented: $confirmReplace, titleVisibility: .visible) {
+            Button("Replace", role: .destructive) { save(); done(true) }
+            Button("Keep the saved one", role: .cancel) {}
+        } message: {
+            if let e = existing { Text("\(Cal.dayTitleFormatter.string(from: e.date)) at \(e.broker) already has \(Money.signed(e.pnl)).") }
+        }
+    }
+
+    /// A different record already saved for the chosen day and broker.
+    private var existing: TradeDay? {
+        guard let e = store.state.trades[TradeDay.key(Cal.startOfDay(day), broker)], e.assetId != finding.assetID else { return nil }
+        return e
+    }
+
+    private var warnings: [String] {
+        var w: [String] = []
+        let r = finding.reading
+        if !finding.dateKnown { w.append("The picture's date was not available: check the trading day.") }
+        if let b = r.broker, !Brokers.all.contains(b) {
+            w.append("\(b) screen: choose the broker below.")
+        } else if r.broker == nil && !asHoldings {
+            w.append("Broker not read from the screen: check it below.")
+        }
+        // A positions screen taken while NSE was open shows a P&L that can still change.
+        let mins = Cal.hour(finding.created) * 60 + Cal.cal.component(.minute, from: finding.created)
+        if !asHoldings && !r.commodity && Holidays.isTradingDay(finding.created, extra: store.state.userHolidays)
+            && mins >= 9 * 60 + 15 && mins < 15 * 60 + 30 {
+            w.append("Taken at \(Cal.timeFormatter.string(from: finding.created)), while the market was open: the day's final P&L may differ.")
+        }
+        return w
     }
 
     private func save() {
@@ -124,7 +164,7 @@ struct FindingCard: View {
             let d = Cal.startOfDay(day)
             var t = store.state.trades[TradeDay.key(d, broker)] ?? TradeDay(id: TradeDay.key(d, broker), date: d, broker: broker, pnl: v)
             t.pnl = v
-            t.charges = Money.parse(charges)
+            t.charges = Money.parse(charges) ?? t.charges
             t.positions = finding.reading.positions
             t.source = .screenshot
             t.assetId = finding.assetID
@@ -142,6 +182,7 @@ struct TradeEditView: View {
     @State private var pnl: String
     @State private var charges: String
     @State private var note: String
+    @State private var confirmReplace = false
 
     init(day: TradeDay) {
         original = day
@@ -158,7 +199,7 @@ struct TradeEditView: View {
                 Section {
                     DatePicker("Trading day", selection: $day, displayedComponents: .date)
                     Picker("Broker", selection: $broker) {
-                        ForEach(["Dhan", "Kite", "Kotak Neo", "Upstox", "Groww", "Angel One", "ICICI Direct", "Fyers", "5paisa", "Other"], id: \.self) { Text($0).tag($0) }
+                        ForEach(Brokers.all.contains(original.broker) ? Brokers.all : [original.broker] + Brokers.all, id: \.self) { Text($0).tag($0) }
                     }
                     TextField("P&L ₹ (minus for a loss)", text: $pnl).keyboardType(.numbersAndPunctuation)
                     TextField("Charges ₹ (brokerage, STT, GST …)", text: $charges).keyboardType(.decimalPad)
@@ -177,31 +218,57 @@ struct TradeEditView: View {
                 }
                 Section {
                     Button("Save") {
-                        guard let v = Money.parse(pnl) else { return }
-                        let d = Cal.startOfDay(day)
-                        var t = original
-                        if TradeDay.key(d, broker) != original.id { store.deleteTrade(original) }
-                        t.id = TradeDay.key(d, broker)
-                        t.date = d
-                        t.broker = broker
-                        t.pnl = v
-                        t.charges = Money.parse(charges)
-                        t.note = note.trimmed.isEmpty ? nil : note
-                        store.saveTrade(t)
-                        Haptic.success()
-                        dismiss()
+                        guard Money.parse(pnl) != nil else { return }
+                        if replacing != nil { confirmReplace = true } else { commit() }
                     }
                     .disabled(Money.parse(pnl) == nil)
-                    if store.state.trades[original.id] != nil {
+                    if isStored {
                         Button("Delete this day", role: .destructive) { store.deleteTrade(original); dismiss() }
                     }
+                } footer: {
+                    if let other = replacing {
+                        Text("\(Cal.dayTitleFormatter.string(from: other.date)) at \(other.broker) already has \(Money.signed(other.pnl)) saved; saving replaces it.")
+                            .foregroundColor(.orange)
+                    }
                 }
+            }
+            .confirmationDialog("Replace the saved P&L?", isPresented: $confirmReplace, titleVisibility: .visible) {
+                Button("Replace", role: .destructive) { commit() }
+                Button("Cancel", role: .cancel) {}
             }
             .kuberaScreen()
             .navigationTitle("Day's P&L")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar { ToolbarItem(placement: .cancellationAction) { Button("Cancel") { dismiss() } } }
         }
+    }
+
+    private var newKey: String { TradeDay.key(Cal.startOfDay(day), broker) }
+
+    /// Editing a saved record (rather than a new day opened from ✎ or "Traded, no P&L yet").
+    private var isStored: Bool { store.state.trades[original.id]?.addedAt == original.addedAt }
+
+    /// Another saved record that saving would overwrite.
+    private var replacing: TradeDay? {
+        guard let other = store.state.trades[newKey], other.addedAt != original.addedAt else { return nil }
+        return other
+    }
+
+    private func commit() {
+        guard let v = Money.parse(pnl) else { return }
+        let d = Cal.startOfDay(day)
+        var t = original
+        // Moving a saved record to another day or broker takes it off the old one.
+        if newKey != original.id && isStored { store.deleteTrade(original) }
+        t.id = newKey
+        t.date = d
+        t.broker = broker
+        t.pnl = v
+        t.charges = Money.parse(charges)
+        t.note = note.trimmed.isEmpty ? nil : note
+        store.saveTrade(t)
+        Haptic.success()
+        dismiss()
     }
 }
 
@@ -281,4 +348,9 @@ struct HolidaysView: View {
             }
         }
     }
+}
+
+enum Brokers {
+    /// Brokers the pickers offer.
+    static let all = ["Dhan", "Kite", "Kotak Neo", "Upstox", "Groww", "Angel One", "ICICI Direct", "Fyers", "5paisa", "Other"]
 }

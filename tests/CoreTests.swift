@@ -41,6 +41,8 @@ struct CoreTests {
         categorizerTests(db)
         ledgerTests(db)
         holidayTests()
+        commodityDayTests()
+        savedFileTests()
         statsTests()
         ocrTests()
         moneyTests()
@@ -309,6 +311,50 @@ struct CoreTests {
 
     // MARK: Holidays
 
+    static func commodityDayTests() {
+        print("\n# commodity trading day")
+        // 24 Nov 2026 (Tuesday) is an NSE holiday; MCX's evening session runs.
+        let eve = Cal.make(2026, 11, 24, 20, 30)!
+        check(Cal.dayKey(Holidays.tradingDay(forScreenshotAt: eve, commodity: true)) == "2026-11-24", "MCX evening on an NSE holiday is that day")
+        check(Cal.dayKey(Holidays.tradingDay(forScreenshotAt: eve)) == "2026-11-23", "an equity screenshot on that holiday is the day before")
+        let late = Cal.make(2026, 11, 25, 0, 30)!
+        check(Cal.dayKey(Holidays.tradingDay(forScreenshotAt: late, commodity: true)) == "2026-11-24", "after midnight it is still the holiday's evening session")
+        let noon = Cal.make(2026, 11, 24, 12, 0)!
+        check(Cal.dayKey(Holidays.tradingDay(forScreenshotAt: noon, commodity: true)) == "2026-11-23", "MCX at noon on an NSE holiday: morning session closed")
+        let sat = Cal.make(2026, 11, 28, 20, 0)!
+        check(Cal.dayKey(Holidays.tradingDay(forScreenshotAt: sat, commodity: true)) == "2026-11-27", "Saturday goes back to Friday")
+    }
+
+    static func savedFileTests() {
+        print("\n# reading saved files")
+        // Entries written by an older build lack fields added later; one damaged entry must not lose the rest.
+        let json = """
+        {"version":1,
+         "txns":[{"id":"a","date":0,"amount":10,"direction":"debit"},
+                 {"id":"b","date":0,"amount":"oops","direction":"debit"},
+                 {"id":"c","date":0,"amount":5,"direction":"credit","hint":"somethingNew","source":"fax"}],
+         "trades":{"2026-11-27|Dhan":{"id":"2026-11-27|Dhan","date":0,"broker":"Dhan","pnl":1234.5}},
+         "balances":{"HDFC Bank|1234":{"id":"HDFC Bank|1234","institution":"HDFC Bank","kind":"savings","balance":100,"asOf":0}},
+         "rules":{"swiggy":{"key":"swiggy","category":"food","label":"Swiggy"}},
+         "manual":[{"name":"Gold","kind":"gold","value":50000}],
+         "customCategories":[{"id":"custom.pets","name":"Pets","symbol":"pawprint.fill","colorHex":"#123456","kind":"expense"}],
+         "lastSMSRowID":42}
+        """
+        do {
+            let st = try JSONDecoder().decode(LedgerState.self, from: Data(json.utf8))
+            check(st.txns.map { $0.id } == ["a", "c"] && st.droppedOnLoad == 1, "a damaged transaction is left out, the rest kept (\(st.txns.count), dropped \(st.droppedOnLoad))")
+            check(st.txns.last?.hint == TxnHint.none && st.txns.last?.source == .sms, "unknown values fall back")
+            check(st.trades.first?.value.pnl == 1234.5 && st.trades.first?.value.positions.isEmpty == true, "trade day without later fields")
+            check(st.balances.first?.value.includeInNetWorth == true && st.balances.first?.value.history.isEmpty == true, "balance without later fields")
+            check(st.rules["swiggy"]?.hits == 0 && st.manual.first?.value == 50000 && st.customCategories.first?.builtIn == false, "rule, item and category without later fields")
+            check(st.lastSMSRowID == 42, "progress markers kept")
+            let again = try JSONDecoder().decode(LedgerState.self, from: try JSONEncoder().encode(st))
+            check(again.txns.count == 2 && again.trades.count == 1 && again.droppedOnLoad == 0, "saved again and read back")
+        } catch {
+            check(false, "saved file decodes: \(error)")
+        }
+    }
+
     static func holidayTests() {
         print("\n# holidays")
         check(!Holidays.isTradingDay(Cal.make(2026, 12, 25)!), "Christmas closed")
@@ -387,6 +433,37 @@ struct CoreTests {
                     OCRLine(text: "2,00,000.00", x: 0.55, y: 0.18, w: 0.4, h: 0.03)]
         let h = TradeOCRParser.read(hold)
         check(h.kind == .holdings && h.currentValue == 245000 && h.invested == 200000, "holdings screen values")
+
+        // A positions screen with both figures: the day's P&L, not "overall" (which counts carried positions' earlier days).
+        let both = [OCRLine(text: "Positions", x: 0.05, y: 0.05, w: 0.3, h: 0.02),
+                    OCRLine(text: "Overall P&L", x: 0.05, y: 0.12, w: 0.3, h: 0.015),
+                    OCRLine(text: "+12,000.00", x: 0.05, y: 0.14, w: 0.3, h: 0.025),
+                    OCRLine(text: "Today's P&L", x: 0.55, y: 0.12, w: 0.3, h: 0.015),
+                    OCRLine(text: "+4,000.00", x: 0.55, y: 0.14, w: 0.3, h: 0.025),
+                    OCRLine(text: "NIFTY FUT", x: 0.05, y: 0.3, w: 0.3, h: 0.02)]
+        check(TradeOCRParser.read(both).total == 4000, "today's P&L beats overall on a positions screen (\(TradeOCRParser.read(both).total.map { String($0) } ?? "nil"))")
+        // Three labels in a row: each label's own column.
+        let cols = [OCRLine(text: "Positions", x: 0.05, y: 0.05, w: 0.3, h: 0.02),
+                    OCRLine(text: "Realised P&L", x: 0.05, y: 0.12, w: 0.25, h: 0.015),
+                    OCRLine(text: "Unrealised P&L", x: 0.36, y: 0.12, w: 0.25, h: 0.015),
+                    OCRLine(text: "Total P&L", x: 0.68, y: 0.12, w: 0.25, h: 0.015),
+                    OCRLine(text: "-1,000.00", x: 0.05, y: 0.14, w: 0.25, h: 0.02),
+                    OCRLine(text: "-1,345.50", x: 0.36, y: 0.14, w: 0.25, h: 0.02),
+                    OCRLine(text: "-2,345.50", x: 0.68, y: 0.14, w: 0.25, h: 0.02)]
+        check(TradeOCRParser.read(cols).total == -2345.5, "three-column summary reads the Total column (\(TradeOCRParser.read(cols).total.map { String($0) } ?? "nil"))")
+        // Live Text gives lines in reading order only; the reader spaces them evenly down the page.
+        let texts = ["11/27 Fri", "Positions", "Orders", "Overall P&L", "₹ 12,345.00 on 1 positions",
+                     "Your P&L for today, Verified by Dhan. Tap to share.", "All 1", "Closed Positions",
+                     "SENSEX 03 DEC 83100 PUT", "12,345.00", "Intraday W Qty. 1,000 x 150.25 BSE", "Closed"]
+        let n = Double(texts.count)
+        let plain = texts.enumerated().map { i, t in OCRLine(text: t, x: 0.05, y: Double(i) / n, w: 0.9, h: 0.8 / n) }
+        let lt = TradeOCRParser.read(plain)
+        check(lt.broker == "Dhan" && lt.kind == .positions && lt.total == 12345, "Dhan screen read as plain lines (total \(lt.total.map { String($0) } ?? "nil"))")
+        let mcx = [OCRLine(text: "Positions", x: 0.05, y: 0.05, w: 0.3, h: 0.02), OCRLine(text: "Total P&L", x: 0.05, y: 0.12, w: 0.3, h: 0.015),
+                   OCRLine(text: "+2,500.00", x: 0.05, y: 0.14, w: 0.3, h: 0.025),
+                   OCRLine(text: "CRUDEOIL 16 DEC 5200 CE", x: 0.05, y: 0.3, w: 0.5, h: 0.02), OCRLine(text: "+2,500.00", x: 0.75, y: 0.3, w: 0.2, h: 0.02)]
+        check(TradeOCRParser.read(mcx).commodity, "MCX rows mark the screen as commodity")
+        check(!TradeOCRParser.read(dhan).commodity, "index options are not commodity")
     }
 
     static func moneyTests() {

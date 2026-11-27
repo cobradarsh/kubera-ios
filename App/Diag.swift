@@ -145,6 +145,10 @@ enum Diag {
                 let r = TradeOCRParser.read(lines)
                 log("reading broker=\(r.broker ?? "-") kind=\(r.kind.rawValue) total=\(r.total.map { String($0) } ?? "-") current=\(r.currentValue.map { String($0) } ?? "-") conf=\(r.confidence) rows=\(r.positions.count) notes=\(r.notes)")
             }
+        case "ocrprobe":
+            // Every text-recogniser setup on one picture, with timings and errors.
+            guard let p = a["path"], let img = UIImage(contentsOfFile: p), let cg = ScreenshotScanner.bitmap(of: img) else { log("ocrprobe: no image"); return }
+            Task { for l in await TextReader.probe(cg) { log("probe " + l) } }
         case "importfile":
             // Same path as a picture chosen with the Screenshot button, from a file on the phone.
             guard let p = a["path"], let img = UIImage(contentsOfFile: p) else { log("importfile: no image"); return }
@@ -155,12 +159,12 @@ enum Diag {
                 log("importfile reading broker=\(r.broker ?? "-") kind=\(r.kind.rawValue) total=\(r.total.map { String($0) } ?? "-") conf=\(r.confidence) rows=\(r.positions.map { "\($0.symbol)=\($0.pnl)" }) notes=\(r.notes)")
                 try? await Task.sleep(nanoseconds: 600_000_000)
                 router.diagFindings = [ScreenshotFinding(assetID: "file:" + p, created: created, image: img, reading: r,
-                                                         tradingDay: Holidays.tradingDay(forScreenshotAt: created, extra: store.state.userHolidays))]
+                                                         tradingDay: Holidays.tradingDay(forScreenshotAt: created, extra: store.state.userHolidays, commodity: r.commodity))]
             }
         case "scanshots":
             Task {
                 let since = Cal.addDays(-(Int(a["days"] ?? "3") ?? 3), to: Date())
-                let found = await ScreenshotScanner.scan(since: since, skip: [], holidays: store.state.userHolidays)
+                let found = await ScreenshotScanner.scan(since: since, skip: [], holidays: store.state.userHolidays).findings
                 log("scanshots found \(found.count): " + found.map { "\($0.reading.broker ?? "-") \($0.reading.total.map { String($0) } ?? "-") day=\(Cal.dayKey($0.tradingDay))" }.joined(separator: "; "))
             }
         case "holiday":

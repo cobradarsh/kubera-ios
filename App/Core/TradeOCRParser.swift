@@ -29,6 +29,8 @@ struct TradeReading: Hashable {
     /// 0…1: how sure the reader is about `total`.
     var confidence: Double
     var notes: [String]
+    /// Rows are MCX commodities, whose evening session also runs on most NSE holidays.
+    var commodity: Bool = false
 }
 
 /// Reads broker screenshots (Dhan, Kite, Kotak Neo, Upstox, Groww, Angel One …) from recognised text lines.
@@ -54,6 +56,8 @@ enum TradeOCRParser {
     private static let labelRx = Rx(#"(total\s*p\s*[&n]\s*l|overall\s*p\s*[&n]\s*l|today'?s\s*p\s*[&n]\s*l|day'?s\s*p\s*[&n]\s*l|net\s*p\s*[&n]\s*l|realised\s*p\s*[&n]\s*l|realized\s*p\s*[&n]\s*l|unrealised|unrealized|\bp\s*&\s*l\b|\bpnl\b|\bp/l\b|total returns|overall returns|total profit|total loss|m2m|mtm)"#)
     private static let symbolRx = Rx(#"\b(NIFTY|BANKNIFTY|FINNIFTY|MIDCPNIFTY|SENSEX|BANKEX|CRUDEOIL|CRUDEOILM|NATURALGAS|NATGASMINI|GOLD|GOLDM|GOLDPETAL|SILVER|SILVERM|SILVERMIC|COPPER|ZINC|ALUMINIUM|LEAD|USDINR)\b[^\n]*"#, [.caseInsensitive])
     private static let optionRx = Rx(#"\b(CE|PE|FUT|CALL|PUT)\b"#, [.caseInsensitive])
+    private static let mcxNames: Set<String> = ["CRUDEOIL", "CRUDEOILM", "NATURALGAS", "NATGASMINI", "GOLD", "GOLDM", "GOLDPETAL",
+                                                "SILVER", "SILVERM", "SILVERMIC", "COPPER", "ZINC", "ALUMINIUM", "LEAD"]
 
     static func detectBroker(_ lines: [OCRLine]) -> String? {
         let all = lines.map { $0.text.lowercased() }.joined(separator: " \n ")
@@ -116,8 +120,16 @@ enum TradeOCRParser {
         for (i, l) in sorted.enumerated() {
             guard let g = labelRx.match(l.text.lowercased()), let label = g[1] else { continue }
             var score = 1.0
-            if label.contains("total") || label.contains("overall") || label.contains("net") { score += 2 }
-            if label.contains("today") || label.contains("day") { score += 1 }
+            let isTotal = label.contains("total") || label.contains("overall") || label.contains("net")
+            let isDay = label.contains("day") || label == "m2m" || label == "mtm"
+            if kind == .holdings {
+                if isTotal { score += 2 }
+                if isDay { score += 1 }
+            } else {
+                // Positions: the day's figure beats "overall", which also counts earlier days of carried positions.
+                if isDay { score += 3 }
+                if isTotal { score += 2 }
+            }
             if label.contains("unreal") { score -= 0.5 }
             score += max(0, 0.6 - l.y)  // near the top
             // Same line, right of the label.
@@ -126,17 +138,19 @@ enum TradeOCRParser {
             if let v = sameLine.first {
                 candidates.append((v, score + 0.5, label)); continue
             }
-            // Lines just below (within 9% of the height) or to the right on the same row.
+            // Lines just below (within 9% of the height, in the label's own column) or to the right on the same row.
             var best: (Double, Double)?
             for j in max(0, i - 3)..<min(sorted.count, i + 6) where j != i {
                 let o = sorted[j]
                 if isPercentOnly(o.text) { continue }
                 let dy = o.midY - l.midY
                 let sameRow = abs(dy) < max(l.h, o.h) * 0.6 && o.x > l.x
-                let below = dy > 0 && dy < 0.09 && abs(o.x - l.x) < 0.35
+                let sameColumn = (o.x < l.maxX + 0.02 && o.maxX > l.x - 0.02) || abs(o.x - l.x) < 0.12
+                let below = dy > 0 && dy < 0.09 && sameColumn
                 guard sameRow || below else { continue }
                 guard let v = numbers(in: o).first else { continue }
-                let s = score + (sameRow ? 0.4 : 0.2) + min(0.5, o.h * 8) // bigger text ranks higher
+                // Bigger text ranks higher; nearer text wins a tie.
+                let s = score + (sameRow ? 0.4 : 0.2) + min(0.5, o.h * 8) - abs(o.x - l.x) * 0.3 - max(0, dy) * 2
                 if best == nil || s > best!.1 { best = (v, s) }
             }
             if let b = best { candidates.append((b.0, b.1, label)) }
@@ -182,8 +196,9 @@ enum TradeOCRParser {
             if abs(sum - t) < max(1, abs(t) * 0.01) { confidence = min(1, confidence + 0.2); notes.append("Rows add up to the total") }
         }
         if total == nil { notes.append("No P&L found") }
+        let commodity = positions.contains { p in mcxNames.contains(p.symbol.split(separator: " ").first.map { String($0).uppercased() } ?? "") }
         return TradeReading(broker: broker, kind: kind, total: total, currentValue: current, invested: invested,
-                            positions: positions, confidence: confidence, notes: notes)
+                            positions: positions, confidence: confidence, notes: notes, commodity: commodity)
     }
 
     private static func valueNear(label: String, in sorted: [OCRLine]) -> Double? {

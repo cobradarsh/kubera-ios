@@ -27,6 +27,14 @@ final class Store: ObservableObject {
         if let data = try? Data(contentsOf: Paths.ledger) {
             do {
                 state = try JSONDecoder().decode(LedgerState.self, from: data)
+                if state.droppedOnLoad > 0 {
+                    // Some entries could not be read; the next save leaves them out, so keep the file as it was.
+                    let stamp = Int(Date().timeIntervalSince1970)
+                    let copy = Paths.support.appendingPathComponent("kubera.before-\(stamp).json")
+                    try? data.write(to: copy)
+                    Diag.log("load: \(state.droppedOnLoad) saved entries could not be read; copy kept as \(copy.lastPathComponent)")
+                    problem = "\(state.droppedOnLoad) saved entr\(state.droppedOnLoad == 1 ? "y" : "ies") could not be read. The file as it was is kept as \(copy.lastPathComponent)."
+                }
             } catch {
                 // Never overwrite a file we could not read: keep it aside and start empty.
                 let stamp = Int(Date().timeIntervalSince1970)
@@ -264,6 +272,13 @@ final class Store: ObservableObject {
 
     func saveTrade(_ d: TradeDay) {
         mutate { $0.upsertTrade(d) }
+        Reminders.refresh(store: self)
+    }
+
+    /// The broker most days were saved under ("Dhan" before any).
+    var usualBroker: String {
+        let counts = Dictionary(grouping: state.trades.values, by: { $0.broker }).mapValues { $0.count }
+        return counts.max { $0.value < $1.value || ($0.value == $1.value && $0.key > $1.key) }?.key ?? "Dhan"
     }
 
     func deleteTrade(_ d: TradeDay) {

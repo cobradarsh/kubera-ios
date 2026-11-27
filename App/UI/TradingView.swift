@@ -57,6 +57,12 @@ struct TradingView: View {
 
     private func edit(_ d: TradeDay) { sheet = .edit(d) }
 
+    /// The saved record for that day at the usual broker, or a new one to fill in.
+    private func draft(for day: Date) -> TradeDay {
+        let broker = store.usualBroker
+        return store.state.trades[TradeDay.key(day, broker)] ?? TradeDay(id: TradeDay.key(day, broker), date: day, broker: broker, pnl: 0)
+    }
+
     private var chart: Binding<TradeChart> {
         Binding(get: { TradeChart(rawValue: chartRaw) ?? .daily }, set: { chartRaw = $0.rawValue })
     }
@@ -95,7 +101,7 @@ struct TradingView: View {
                         VStack(alignment: .leading, spacing: 6) {
                             SectionTitle(title: "Traded, no P&L yet", trailing: "from BSE/NSE turnover SMS")
                             ForEach(missing, id: \.self) { d in
-                                Button { edit(TradeDay(id: TradeDay.key(d, "Dhan"), date: d, broker: "Dhan", pnl: 0)) } label: {
+                                Button { edit(draft(for: d)) } label: {
                                     HStack {
                                         Text(Cal.dayTitleFormatter.string(from: d))
                                         Spacer()
@@ -171,7 +177,8 @@ struct TradingView: View {
 
     private var addRow: some View {
         HStack(spacing: 10) {
-            PhotosPicker(selection: $picked, maxSelectionCount: 10, matching: .screenshots) {
+            // photoLibrary gives each picked item its library id, so the screenshot's own date can be looked up.
+            PhotosPicker(selection: $picked, maxSelectionCount: 10, matching: .screenshots, photoLibrary: .shared()) {
                 Label("Screenshot", systemImage: "photo.badge.plus").frame(maxWidth: .infinity)
             }
             .buttonStyle(.borderedProminent)
@@ -187,7 +194,7 @@ struct TradingView: View {
             .disabled(scanning)
             Button {
                 let d = Holidays.isTradingDay(Date(), extra: store.state.userHolidays) ? Cal.startOfDay(Date()) : Holidays.previousTradingDay(before: Date())
-                edit(TradeDay(id: TradeDay.key(d, "Dhan"), date: d, broker: "Dhan", pnl: 0))
+                edit(draft(for: d))
             } label: { Image(systemName: "square.and.pencil").padding(.horizontal, 6) }
             .buttonStyle(.bordered)
             .tint(Theme.gold)
@@ -239,20 +246,26 @@ struct TradingView: View {
 
     private func scan(force: Bool) async {
         guard !scanning else { return }
+        // The Invest tab appears often; looking again within two minutes finds nothing new.
+        if !force, let last = TradingView.lastAutoScan, Date().timeIntervalSince(last) < 120 { return }
         if !ScreenshotScanner.authorized() {
             guard force else { return }
             guard await ScreenshotScanner.requestAccess() else { return }
         }
         scanning = true
         defer { scanning = false }
-        let since = store.state.lastScreenshotScan.map { $0.addingTimeInterval(-3 * 86400) } ?? Cal.addDays(-10, to: Date())
+        TradingView.lastAutoScan = Date()
+        let since = store.state.lastScreenshotScan.map { $0.addingTimeInterval(-3 * 86400) } ?? Cal.addDays(-3, to: Date())
         let skip = Set(store.state.seenAssets)
-        let found = await ScreenshotScanner.scan(since: since, skip: skip, holidays: store.state.userHolidays)
-        let known = Set(findings.map { $0.assetID })
-        findings += found.filter { !known.contains($0.assetID) }
-        Diag.log("screenshot scan: \(found.count) broker screenshots since \(since)")
-        if found.isEmpty { store.markSeenAssets([]) }
+        let result = await ScreenshotScanner.scan(since: since, skip: skip, holidays: store.state.userHolidays)
+        let known = Set(findings.map { $0.assetID }).union(store.state.seenAssets)
+        findings += result.findings.filter { !known.contains($0.assetID) }
+        Diag.log("screenshot scan: \(result.findings.count) broker screenshots, \(result.examined.count) others since \(since)")
+        // Screenshots that are not broker screens are not read again; broker ones are remembered once reviewed.
+        store.markSeenAssets(result.examined)
     }
+
+    static var lastAutoScan: Date?
 
     /// Pictures chosen with the Screenshot button: always ends in the review sheet (to type the P&L by hand if
     /// nothing could be read) or in a message saying why not.
@@ -260,21 +273,25 @@ struct TradingView: View {
         guard !items.isEmpty else { return }
         importing = true
         defer { importing = false }
+        // The photo library knows when each screenshot was taken; ask once for access if not asked yet.
+        if PHPhotoLibrary.authorizationStatus(for: .readWrite) == .notDetermined { _ = await ScreenshotScanner.requestAccess() }
         var added = 0
         var failures: [String] = []
         for item in items {
             let id = item.itemIdentifier ?? UUID().uuidString
             var img: UIImage?
             var created: Date?
-            // The photo library knows when the picture was taken (needs Photos access); else the data itself.
             if let ident = item.itemIdentifier, ScreenshotScanner.authorized(),
                let asset = PHAsset.fetchAssets(withLocalIdentifiers: [ident], options: nil).firstObject {
                 created = asset.creationDate
                 img = await ScreenshotScanner.image(for: asset)
             }
-            if img == nil {
+            if img == nil || created == nil {
                 do {
-                    if let data = try await item.loadTransferable(type: Data.self) { img = UIImage(data: data) }
+                    if let data = try await item.loadTransferable(type: Data.self) {
+                        if img == nil { img = UIImage(data: data) }
+                        if created == nil { created = ScreenshotScanner.takenDate(in: data) }
+                    }
                 } catch {
                     Diag.log("import: loadTransferable failed \(error.localizedDescription)")
                     failures.append(error.localizedDescription)
@@ -286,10 +303,11 @@ struct TradingView: View {
             }
             let reading = await ScreenshotScanner.read(image)
             let when = created ?? Date()
-            let day = Holidays.tradingDay(forScreenshotAt: when, extra: store.state.userHolidays)
-            Diag.log("import: \(Int(image.size.width))x\(Int(image.size.height)) taken \(when) broker=\(reading.broker ?? "-") kind=\(reading.kind.rawValue) total=\(reading.total.map { String($0) } ?? "-") conf=\(reading.confidence) notes=\(reading.notes)")
+            let day = Holidays.tradingDay(forScreenshotAt: when, extra: store.state.userHolidays, commodity: reading.commodity)
+            Diag.log("import: \(Int(image.size.width))x\(Int(image.size.height)) taken \(created.map { "\($0)" } ?? "unknown") broker=\(reading.broker ?? "-") kind=\(reading.kind.rawValue) total=\(reading.total.map { String($0) } ?? "-") conf=\(reading.confidence) notes=\(reading.notes)")
             if !findings.contains(where: { $0.assetID == id }) {
-                findings.append(ScreenshotFinding(assetID: id, created: when, image: image, reading: reading, tradingDay: day))
+                findings.append(ScreenshotFinding(assetID: id, created: when, image: image, reading: reading, tradingDay: day,
+                                                  dateKnown: created != nil))
                 added += 1
             }
         }

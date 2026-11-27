@@ -30,6 +30,8 @@ struct LedgerState: Codable {
     var lastScreenshotScan: Date?
     var seenAssets: [String] = []
     var ignoredCount: Int = 0
+    /// Saved entries that could not be read when loading (not saved): the loader keeps a copy of the file then.
+    var droppedOnLoad = 0
 
     init() {}
 
@@ -38,28 +40,59 @@ struct LedgerState: Codable {
              userHolidays, lastSMSRowID, inboxOffsets, mailUIDValidity, mailHighestUID, lastScreenshotScan, seenAssets, ignoredCount
     }
 
+    // Each list is read entry by entry: one damaged entry is left out instead of the whole file failing.
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
-        version = try c.decodeIfPresent(Int.self, forKey: .version) ?? 1
-        txns = try c.decodeIfPresent([Txn].self, forKey: .txns) ?? []
-        rules = try c.decodeIfPresent([String: Rule].self, forKey: .rules) ?? [:]
-        balances = try c.decodeIfPresent([String: AccountBalance].self, forKey: .balances) ?? [:]
-        turnovers = try c.decodeIfPresent([String: Turnover].self, forKey: .turnovers) ?? [:]
-        mandates = try c.decodeIfPresent([MandateHint].self, forKey: .mandates) ?? []
-        loans = try c.decodeIfPresent([String: LoanInfo].self, forKey: .loans) ?? [:]
-        trades = try c.decodeIfPresent([String: TradeDay].self, forKey: .trades) ?? [:]
-        manual = try c.decodeIfPresent([ManualItem].self, forKey: .manual) ?? []
-        snapshots = try c.decodeIfPresent([NetWorthSnapshot].self, forKey: .snapshots) ?? []
-        customCategories = try c.decodeIfPresent([Category].self, forKey: .customCategories) ?? []
-        budgets = try c.decodeIfPresent([String: Double].self, forKey: .budgets) ?? [:]
-        userHolidays = try c.decodeIfPresent([Holiday].self, forKey: .userHolidays) ?? []
-        lastSMSRowID = try c.decodeIfPresent(Int64.self, forKey: .lastSMSRowID) ?? 0
-        inboxOffsets = try c.decodeIfPresent([String: UInt64].self, forKey: .inboxOffsets) ?? [:]
-        mailUIDValidity = try c.decodeIfPresent(UInt32.self, forKey: .mailUIDValidity) ?? 0
-        mailHighestUID = try c.decodeIfPresent(UInt32.self, forKey: .mailHighestUID) ?? 0
-        lastScreenshotScan = try c.decodeIfPresent(Date.self, forKey: .lastScreenshotScan)
-        seenAssets = try c.decodeIfPresent([String].self, forKey: .seenAssets) ?? []
-        ignoredCount = try c.decodeIfPresent(Int.self, forKey: .ignoredCount) ?? 0
+        var dropped = 0
+        version = (try? c.decodeIfPresent(Int.self, forKey: .version)) ?? 1
+        txns = c.lossyList(.txns, dropped: &dropped)
+        rules = c.lossyMap(.rules, dropped: &dropped)
+        balances = c.lossyMap(.balances, dropped: &dropped)
+        turnovers = c.lossyMap(.turnovers, dropped: &dropped)
+        mandates = c.lossyList(.mandates, dropped: &dropped)
+        loans = c.lossyMap(.loans, dropped: &dropped)
+        trades = c.lossyMap(.trades, dropped: &dropped)
+        manual = c.lossyList(.manual, dropped: &dropped)
+        snapshots = c.lossyList(.snapshots, dropped: &dropped)
+        customCategories = c.lossyList(.customCategories, dropped: &dropped)
+        budgets = c.lossyMap(.budgets, dropped: &dropped)
+        userHolidays = c.lossyList(.userHolidays, dropped: &dropped)
+        lastSMSRowID = (try? c.decodeIfPresent(Int64.self, forKey: .lastSMSRowID)) ?? 0
+        inboxOffsets = c.lossyMap(.inboxOffsets, dropped: &dropped)
+        mailUIDValidity = (try? c.decodeIfPresent(UInt32.self, forKey: .mailUIDValidity)) ?? 0
+        mailHighestUID = (try? c.decodeIfPresent(UInt32.self, forKey: .mailHighestUID)) ?? 0
+        lastScreenshotScan = try? c.decodeIfPresent(Date.self, forKey: .lastScreenshotScan)
+        seenAssets = c.lossyList(.seenAssets, dropped: &dropped)
+        ignoredCount = (try? c.decodeIfPresent(Int.self, forKey: .ignoredCount)) ?? 0
+        droppedOnLoad = dropped
+    }
+}
+
+/// One saved entry, or nil when it cannot be read.
+private struct Lossy<T: Decodable>: Decodable {
+    let value: T?
+    init(from decoder: Decoder) throws { value = try? T(from: decoder) }
+}
+
+private extension KeyedDecodingContainer {
+    func lossyList<T: Decodable>(_ key: Key, dropped: inout Int) -> [T] {
+        guard let items = try? decodeIfPresent([Lossy<T>].self, forKey: key) else {
+            if contains(key) { dropped += 1 }
+            return []
+        }
+        let kept = items.compactMap { $0.value }
+        dropped += items.count - kept.count
+        return kept
+    }
+
+    func lossyMap<T: Decodable>(_ key: Key, dropped: inout Int) -> [String: T] {
+        guard let items = try? decodeIfPresent([String: Lossy<T>].self, forKey: key) else {
+            if contains(key) { dropped += 1 }
+            return [:]
+        }
+        let kept = items.compactMapValues { $0.value }
+        dropped += items.count - kept.count
+        return kept
     }
 }
 
