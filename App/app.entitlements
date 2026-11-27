@@ -11,7 +11,10 @@
 		<string>TROLLSTORE.com.cobradarsh.kubera</string>
 	</array>
 	<!-- Read /var/mobile/Library/SMS/sms.db (read-only) and the tweak's inbox in /var/mobile/Library/Kubera.
-	     No container-required: with it iOS 16.5 gives an unsandboxed app another app's stray container. -->
+	     no-sandbox needs platform-application to launch (as TrollStore, Dopamine and every other unsandboxed app
+	     on the phone have). No container-required: with it iOS 16.5 hands out another app's stray container. -->
+	<key>platform-application</key>
+	<true/>
 	<key>com.apple.private.security.no-sandbox</key>
 	<true/>
 	<key>com.apple.private.security.storage.Messages</key>
