@@ -10,10 +10,9 @@
 	<array>
 		<string>TROLLSTORE.com.cobradarsh.kubera</string>
 	</array>
-	<!-- Read /var/mobile/Library/SMS/sms.db (read-only) and the tweak's inbox in /var/mobile/Library/Kubera. -->
+	<!-- Read /var/mobile/Library/SMS/sms.db (read-only) and the tweak's inbox in /var/mobile/Library/Kubera.
+	     No container-required: with it iOS 16.5 gives an unsandboxed app another app's stray container. -->
 	<key>com.apple.private.security.no-sandbox</key>
-	<true/>
-	<key>com.apple.private.security.container-required</key>
 	<true/>
 	<key>com.apple.private.security.storage.Messages</key>
 	<true/>

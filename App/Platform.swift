@@ -2,17 +2,23 @@ import Foundation
 import Security
 import UIKit
 
+/// Fixed places on the real file system. TrollStore gives an unsandboxed app no data container of its own
+/// (with `container-required` iOS hands it a stray container of another app), so nothing here depends on
+/// NSHomeDirectory(). The data also survives reinstalls and updates.
 enum Paths {
-    static let support: URL = {
-        let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
-        let u = base.appendingPathComponent("Kubera", isDirectory: true)
-        try? FileManager.default.createDirectory(at: u, withIntermediateDirectories: true)
-        return u
-    }()
-    static let caches: URL = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
-    /// Shared with the Kubera Listener tweak (real file system; SpringBoard writes as mobile).
+    /// Shared with the Kubera Listener tweak (SpringBoard writes the inbox here as mobile).
     static let shared = URL(fileURLWithPath: "/var/mobile/Library/Kubera", isDirectory: true)
+    static let support: URL = make("Data")
+    /// Test hooks: marker, log, command file, pictures.
+    static let caches: URL = make("Diag")
     static let ledger = support.appendingPathComponent("kubera.json")
+
+    private static func make(_ name: String) -> URL {
+        let u = shared.appendingPathComponent(name, isDirectory: true)
+        try? FileManager.default.createDirectory(at: u, withIntermediateDirectories: true,
+                                                 attributes: [.posixPermissions: NSNumber(value: 0o755)])
+        return u
+    }
 }
 
 /// App settings (UserDefaults). Names are also used by @AppStorage in the views.

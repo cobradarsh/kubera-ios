@@ -2,7 +2,7 @@
 # Drives Kubera on the jailbroken iPhone over SSH (host alias "iphone-root", TrollStore installed).
 #
 #   phone.sh install <Kubera.ipa>   copy the IPA over and install it with TrollStore's helper
-#   phone.sh container             print the app's data container
+#   phone.sh container             print the app's data folder (fixed: /var/mobile/Library/Kubera)
 #   phone.sh enable | disable      create / remove the marker file that turns the test hooks on
 #   phone.sh diag <command?query>  run a test hook, e.g. `diag state` (the phone must be unlocked)
 #   phone.sh log [n]               last n lines of the hook log (default 40)
@@ -19,15 +19,9 @@ ROOT="${KUBERA_ROOT-/rootfs}"    # the real file system, as a RootHide shell see
 OUT="${KUBERA_SHOTS:-./shots}"
 META=.com.apple.mobile_container_manager.metadata.plist
 
-container() {
-    # Remembered in .phone-container after the first lookup (the scan over all containers can be slow).
-    local cache="$(dirname "$0")/../.phone-container"
-    if [ -s "$cache" ] && $SSH "test -d '$(cat "$cache")'"; then cat "$cache"; return; fi
-    local c
-    c=$($SSH "for f in $ROOT/var/mobile/Containers/Data/Application/*/$META; do             if grep -q -a 'com.cobradarsh.kubera' \"\$f\"; then dirname \"\$f\"; break; fi; done")
-    [ -n "$c" ] && echo "$c" > "$cache"
-    echo "$c"
-}
+# Kubera keeps its data and test files at fixed paths (no app container; see App/Platform.swift).
+DIAG="$ROOT/var/mobile/Library/Kubera/Diag"
+container() { echo "$ROOT/var/mobile/Library/Kubera"; }
 
 case "${1:-}" in
     install)
@@ -40,20 +34,17 @@ case "${1:-}" in
         ;;
     container) container ;;
     enable)
-        C="$(container)"; [ -n "$C" ] || { echo "no data container yet: open the app once first"; exit 1; }
-        $SSH "mkdir -p '$C/Library/Caches' && touch '$C/Library/Caches/kb-diag' && chown -R mobile:mobile '$C/Library/Caches/kb-diag' && ls '$C/Library/Caches/'"
+        $SSH "mkdir -p '$DIAG' && touch '$DIAG/kb-diag' && chown -R mobile:mobile '$ROOT/var/mobile/Library/Kubera' && ls '$DIAG'"
         ;;
     disable)
-        C="$(container)"; [ -n "$C" ] || exit 1
-        $SSH "cd '$C/Library/Caches' && rm -f kb-diag kb-diag.log; ls"
+        $SSH "cd '$DIAG' && rm -f kb-diag kb-diag.log kb-diag-cmd && find . -name 'kb-snap-*.png' -delete; ls"
         ;;
     launch) $SSH "uiopen 'kubera://'; echo uiopen-exit=\$?" ;;
     diag) $SSH "uiopen 'kubera://_diag/$2'; echo uiopen-exit=\$?" ;;
-    log) C="$(container)"; $SSH "tail -n ${2:-40} '$C/Library/Caches/kb-diag.log' 2>/dev/null" ;;
+    log) $SSH "tail -n ${2:-40} '$DIAG/kb-diag.log' 2>/dev/null" ;;
     # A hook through the command file (no uiopen; works while the app is open, even in the background).
     cmd)
-        C="$(container)"
-        $SSH "echo '$2' >> '$C/Library/Caches/kb-diag-cmd'; echo queued"
+        $SSH "echo '$2' >> '$DIAG/kb-diag-cmd'; echo queued"
         ;;
     # The Kubera Listener tweak: copy, dpkg -i, respring.
     deb)
@@ -63,10 +54,10 @@ case "${1:-}" in
         ;;
     tweaklog) $SSH "tail -n ${2:-30} $ROOT/var/mobile/Library/Logs/KuberaListener.log 2>/dev/null" ;;
     snap)
-        C="$(container)"; mkdir -p "$OUT"
-        $SSH "rm -f '$C/Library/Caches/kb-snap-$2.png'; uiopen 'kubera://_diag/snapshot?name=$2'" >/dev/null
+        mkdir -p "$OUT"
+        $SSH "rm -f '$DIAG/kb-snap-$2.png'; uiopen 'kubera://_diag/snapshot?name=$2'" >/dev/null
         sleep "${3:-3}"
-        $SSH "cat '$C/Library/Caches/kb-snap-$2.png'" > "$OUT/$2.png" && $SSH "rm -f '$C/Library/Caches/kb-snap-$2.png'"
+        $SSH "cat '$DIAG/kb-snap-$2.png'" > "$OUT/$2.png" && $SSH "rm -f '$DIAG/kb-snap-$2.png'"
         ls -la "$OUT/$2.png"
         ;;
     *) sed -n '2,13p' "$0"; exit 2 ;;

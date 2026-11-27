@@ -3,8 +3,8 @@ import UIKit
 import SwiftUI
 import UserNotifications
 
-/// Test hooks, off unless Library/Caches/kb-diag exists when the app starts.
-/// kubera://_diag/<command>?<args> (or lines in Library/Caches/kb-diag-cmd); results in Library/Caches/kb-diag.log.
+/// Test hooks, off unless /var/mobile/Library/Kubera/Diag/kb-diag exists when the app starts.
+/// kubera://_diag/<command>?<args> (or lines in Diag/kb-diag-cmd); results in Diag/kb-diag.log.
 enum Diag {
     static var enabled = false
     private static let logURL = Paths.caches.appendingPathComponent("kb-diag.log")
