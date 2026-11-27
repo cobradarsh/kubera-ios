@@ -1,0 +1,122 @@
+# Builds the Kubera Listener tweak (Tweak/) for RootHide on macOS with Xcode's toolchain.
+#
+# Xcode's clang tags the arm64e slice with the VERSIONED ptrauth ABI (cpusubtype 0x80000002), which dyld requires
+# before it will load a library into arm64e processes (SpringBoard). The gate step fails the build unless that
+# slice is present.
+name: Build tweak (Kubera Listener)
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - Tweak/**
+      - .github/workflows/tweak.yml
+
+jobs:
+  # A quick compile check on Linux (nothing is linked): a typo shows up in a minute.
+  syntax:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Get iOS 16.5 SDK
+        run: |
+          curl -fsSL -o "$RUNNER_TEMP/sdk.tar.xz" https://github.com/theos/sdks/releases/latest/download/iPhoneOS16.5.sdk.tar.xz
+          mkdir -p "$RUNNER_TEMP/sdk"
+          tar xf "$RUNNER_TEMP/sdk.tar.xz" -C "$RUNNER_TEMP/sdk"
+
+      - name: Compile every source (syntax only)
+        working-directory: Tweak
+        run: |
+          clang --version
+          SDK="$RUNNER_TEMP/sdk/iPhoneOS16.5.sdk"
+          fail=0
+          for f in *.m; do
+            echo "== $f"
+            clang -fsyntax-only -x objective-c -target arm64-apple-ios15.0 -isysroot "$SDK" -fobjc-arc \
+              -Wall -Werror -Wno-deprecated-declarations -Wno-unused-variable -Wno-unused-function \
+              -Wno-unused-but-set-variable -I. "$f" || fail=1
+          done
+          echo "== verify_arm64e.py"
+          python3 -m py_compile verify_arm64e.py || fail=1
+          exit $fail
+
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [macos-15, macos-15-intel]
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install ldid
+        # Theos signs with ldid and packs the .deb itself. ldid comes as a ready binary from its own releases;
+        # Homebrew (slow on Intel, where it builds from source) is only the fallback.
+        env:
+          HOMEBREW_NO_AUTO_UPDATE: "1"
+          HOMEBREW_NO_INSTALL_CLEANUP: "1"
+        run: |
+          mkdir -p "$HOME/bin"
+          if ! command -v ldid > /dev/null; then
+            url="https://github.com/ProcursusTeam/ldid/releases/latest/download/ldid_macosx_$(uname -m)"
+            curl -fsSL -o "$HOME/bin/ldid" "$url" || true
+            if file "$HOME/bin/ldid" 2>/dev/null | grep -q "Mach-O"; then
+              chmod +x "$HOME/bin/ldid"
+            else
+              rm -f "$HOME/bin/ldid"
+              brew install ldid
+            fi
+          fi
+          echo "$HOME/bin" >> "$GITHUB_PATH"
+          command -v xz > /dev/null || brew install xz || true
+
+      - name: Install RootHide Theos
+        run: |
+          git clone --recursive https://github.com/roothide/theos.git "$HOME/theos"
+          git -C "$HOME/theos" submodule update --init --recursive
+          echo "THEOS=$HOME/theos" >> "$GITHUB_ENV"
+
+      - name: Get iOS 16.5 SDK
+        run: |
+          mkdir -p "$HOME/theos/sdks"
+          cd "$HOME/theos/sdks"
+          curl -fsSL -o iPhoneOS16.5.sdk.tar.xz https://github.com/theos/sdks/releases/latest/download/iPhoneOS16.5.sdk.tar.xz
+          tar xf iPhoneOS16.5.sdk.tar.xz
+          ls -d iPhoneOS*.sdk
+
+      - name: Build the .deb (Xcode clang => versioned arm64e)
+        working-directory: Tweak
+        run: |
+          export THEOS="$HOME/theos"
+          set -o pipefail
+          make package FINALPACKAGE=1 THEOS_PACKAGE_SCHEME=roothide ARCHS="arm64 arm64e" 2>&1 | tee build.log
+          ls -la packages/
+
+      - name: Verify the arm64e slice is the versioned ptrauth ABI (gate)
+        working-directory: Tweak
+        run: |
+          DY=$(find . -path "*DynamicLibraries/KuberaListener.dylib" | head -1)
+          [ -n "$DY" ] || DY=.theos/obj/KuberaListener.dylib
+          echo "dylib under test: $DY"
+          lipo -detailed_info "$DY" || true
+          python3 verify_arm64e.py "$DY"
+          otool -arch arm64e -L "$DY" || true
+          mkdir -p "$RUNNER_TEMP/deb" && (cd "$RUNNER_TEMP/deb" && ar x "$GITHUB_WORKSPACE"/Tweak/packages/*.deb && tar tvf data.tar.* && tar xOf control.tar.* ./control) || true
+
+      - name: Upload build log (always)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: kuberalistener-build-log-${{ matrix.runner }}
+          path: Tweak/build.log
+          if-no-files-found: ignore
+
+      - name: Upload .deb
+        uses: actions/upload-artifact@v4
+        with:
+          name: kuberalistener-deb-${{ matrix.runner }}
+          path: Tweak/packages/*.deb

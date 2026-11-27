@@ -1,0 +1,9 @@
+build/
+build-tests/
+out/
+.DS_Store
+__pycache__/
+shots/
+.theos/
+packages/
+.phone-container

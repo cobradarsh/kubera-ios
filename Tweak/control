@@ -1,0 +1,9 @@
+Package: com.adarsh.kuberalistener
+Name: Kubera Listener
+Version: 1.0.0
+Architecture: iphoneos-arm64e
+Description: Hands payment notifications to the Kubera app. When a payment, UPI, wallet, bank, broker, telecom or mail app shows a notification with an amount in it (the rupee sign, Rs or INR followed by a number; mail also needs a word such as debited, credited, paid or UPI), its title and text are added to a small file on the phone that Kubera reads to record the expense. Notifications still appear exactly as before, nothing else is kept, and the text never leaves the phone. Lives in SpringBoard. Needs the Kubera app.
+Maintainer: Adarsh
+Author: Adarsh
+Section: Tweaks
+Depends: ellekit
