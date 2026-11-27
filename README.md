@@ -13,6 +13,20 @@ A personal money app for one iPhone 14 Pro Max on iOS 16.5 (jailbroken, TrollSto
 
 Salutations to Sri Venkateshwara, Goddess Lakshmi and Kubera open the app.
 
+## Using it
+
+1. Install `Kubera.ipa` with TrollStore and open it once: it reads every bank SMS already on the phone, then new
+   ones whenever it comes to the front (and in background refresh when iOS allows).
+2. Optional, for payments that send no SMS (GPay / BHIM / wallet notifications, Gmail alerts): install the
+   **Kubera Listener** `.deb` (respring). More → "Apps to listen to" sets which apps it watches.
+3. Optional, Gmail history: More → Gmail, your address and a Google **app password** (needs 2-Step Verification).
+4. Optional, smarter sorting: More → Smart sorting → your city (for local shops on OpenStreetMap) and, if you want,
+   a Claude API key.
+5. Every day at 22:00 (More → Check-in) a notification lists what is still unsorted. Sorting a payment with
+   "Remember" on makes a rule for that payee.
+6. Trading: after the close, screenshot your positions (Dhan, Kite, Kotak Neo, Upstox, Groww, Angel One…).
+   Invest → the screenshot is found and read; check the number and Save. Holdings screenshots update Net Worth.
+
 ## Layout
 
 | Path | What |

@@ -156,7 +156,11 @@ struct Ledger {
                     if !state.mandates.contains(where: { abs($0.amount - h.amount) < 0.01 && Cal.sameDay($0.due, h.due) }) {
                         state.mandates.append(h)
                     }
-                    state.mandates.removeAll { $0.due < Date().addingTimeInterval(-90 * 86400) }
+                    // Keep the newest notices by count, not by today's date: history is read months later.
+                    if state.mandates.count > 300 {
+                        state.mandates.sort { $0.due < $1.due }
+                        state.mandates.removeFirst(state.mandates.count - 300)
+                    }
                     report.other += 1
                 case let .loanDue(lender, amount, due, account):
                     state.loans[lender] = LoanInfo(lender: lender, emi: amount, nextDue: due, account: account)
