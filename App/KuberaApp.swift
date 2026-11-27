@@ -39,6 +39,22 @@ final class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCent
     func application(_ application: UIApplication, didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]? = nil) -> Bool {
         Pref.register()
         Diag.setup()
+        // Solid black bars with a hairline, for the OLED screen (content never shows through the tab bar).
+        let tab = UITabBarAppearance()
+        tab.configureWithOpaqueBackground()
+        tab.backgroundColor = .black
+        tab.shadowColor = UIColor(white: 0.17, alpha: 1)
+        UITabBar.appearance().standardAppearance = tab
+        UITabBar.appearance().scrollEdgeAppearance = tab
+        let nav = UINavigationBarAppearance()
+        nav.configureWithOpaqueBackground()
+        nav.backgroundColor = .black
+        nav.shadowColor = .clear
+        nav.titleTextAttributes = [.foregroundColor: UIColor.white]
+        nav.largeTitleTextAttributes = [.foregroundColor: UIColor.white]
+        UINavigationBar.appearance().standardAppearance = nav
+        UINavigationBar.appearance().scrollEdgeAppearance = nav
+        UINavigationBar.appearance().compactAppearance = nav
         UNUserNotificationCenter.current().delegate = self
         BackgroundSync.register()
         DarwinNote.observe(DarwinNote.inboxChanged) {
@@ -73,6 +89,8 @@ final class Router: ObservableObject {
     @Published var showMantra = false
     @Published var showBudgets = false
     @Published var showImport = false
+    /// Test hook: screenshots read by `_diag/importfile`, handed to the Invest screen's review.
+    @Published var diagFindings: [ScreenshotFinding] = []
     @Published var showSplash: Bool = Router.splashAtLaunch()
     @Published var expensePath = NavigationPath()
 

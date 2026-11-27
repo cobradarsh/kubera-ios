@@ -86,8 +86,10 @@ struct NetWorthView: View {
         }
     }
 
+    /// Change since the 1st, from the balance history (nil before the first full month of history).
     private func monthChange(_ now: Double) -> Double? {
-        guard let s = store.state.snapshots.last(where: { Cal.sameMonth($0.date, Date()) }) else { return nil }
+        let first = Cal.startOfMonth(Date())
+        guard let s = store.ledger.netWorthHistory().first(where: { Cal.sameDay($0.date, first) }) else { return nil }
         return now - s.net
     }
 
@@ -125,12 +127,13 @@ struct NetWorthView: View {
 
     private func history(_ nw: Ledger.NetWorth) -> some View {
         struct P: Identifiable { var id: String; var date: Date; var value: Double }
-        var points = store.state.snapshots.map { P(id: Cal.dayKey($0.date), date: $0.date, value: $0.net) }
-        points.append(P(id: "now", date: Date(), value: nw.net))
+        let points = store.ledger.netWorthHistory().enumerated().map { i, s in P(id: "\(i)", date: s.date, value: s.net) }
         return VStack(alignment: .leading, spacing: 8) {
-            SectionTitle(title: "Over time", trailing: "a snapshot on the 1st of each month")
+            SectionTitle(title: "Over time", trailing: "on the 1st of each month, and today")
+            Text("Bank and broker balances as the SMS reported them on each date; your own items at today's value.")
+                .font(.caption2).foregroundColor(Theme.faint)
             if points.count < 2 {
-                Text("The line starts after next month's 1st.").font(.footnote).foregroundColor(Theme.dim)
+                Text("The line starts once there is a full month of balance messages.").font(.footnote).foregroundColor(Theme.dim)
             } else {
                 Chart(points) { p in
                     LineMark(x: .value("Date", p.date), y: .value("Net worth", p.value))

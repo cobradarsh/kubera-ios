@@ -82,9 +82,10 @@ enum TradeOCRParser {
         return .unknown
     }
 
-    /// Numbers in a line with their sign.
+    /// Numbers in a line with their sign. When the line has amounts written like money ("66,753.00"), small bare
+    /// counts beside them ("on 1 positions") and a misread rupee sign ("2 66,753.00") are left out.
     static func numbers(in line: OCRLine) -> [Double] {
-        var out: [Double] = []
+        var all: [(value: Double, money: Bool)] = []
         for g in numberRx.matches(line.text) {
             guard let raw = g[2], let v = Money.parse(raw) else { continue }
             let pre = g[1] ?? "", post = g[3] ?? ""
@@ -93,9 +94,10 @@ enum TradeOCRParser {
             if pre == "-" || pre == "−" || post == "-" || post == "−" { sign = -1 }
             else if pre == "+" || post == "+" { sign = 1 }
             else if line.tint != 0 { sign = Double(line.tint) }
-            out.append(sign == 0 ? v : sign * v)
+            all.append((sign == 0 ? v : sign * v, raw.contains(",") || raw.contains(".") || v >= 1000))
         }
-        return out
+        let money = all.filter { $0.money }
+        return (money.isEmpty ? all : money).map { $0.value }
     }
 
     private static func isPercentOnly(_ s: String) -> Bool {

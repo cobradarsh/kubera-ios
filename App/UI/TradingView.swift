@@ -2,6 +2,7 @@ import SwiftUI
 import UIKit
 import Charts
 import PhotosUI
+import Photos
 
 enum TradeChart: String, CaseIterable {
     case daily, equity, calendar, weekday, months, brokers, underlying
@@ -38,8 +39,23 @@ struct TradingView: View {
     @State private var findings: [ScreenshotFinding] = []
     @State private var scanning = false
     @State private var picked: [PhotosPickerItem] = []
-    @State private var editing: TradeDay?
-    @State private var reviewing = false
+    /// One sheet for the whole screen (several .sheet modifiers on one view do not all present on iOS 16).
+    @State private var sheet: TradeSheet?
+    @State private var importing = false
+    @State private var importProblem: String?
+
+    enum TradeSheet: Identifiable {
+        case edit(TradeDay)
+        case review
+        var id: String {
+            switch self {
+            case .edit(let d): return "edit:" + d.id
+            case .review: return "review"
+            }
+        }
+    }
+
+    private func edit(_ d: TradeDay) { sheet = .edit(d) }
 
     private var chart: Binding<TradeChart> {
         Binding(get: { TradeChart(rawValue: chartRaw) ?? .daily }, set: { chartRaw = $0.rawValue })
@@ -56,7 +72,7 @@ struct TradingView: View {
                     MonthSwitcher(month: $month)
                     PnLSummary(stats: stats)
                     if !findings.isEmpty {
-                        Button { reviewing = true } label: {
+                        Button { sheet = .review } label: {
                             HStack {
                                 Image(systemName: "photo.stack.fill").foregroundColor(.black)
                                 Text("\(findings.count) broker screenshot\(findings.count == 1 ? "" : "s") found").fontWeight(.semibold).foregroundColor(.black)
@@ -79,7 +95,7 @@ struct TradingView: View {
                         VStack(alignment: .leading, spacing: 6) {
                             SectionTitle(title: "Traded, no P&L yet", trailing: "from BSE/NSE turnover SMS")
                             ForEach(missing, id: \.self) { d in
-                                Button { editing = TradeDay(id: TradeDay.key(d, "Dhan"), date: d, broker: "Dhan", pnl: 0) } label: {
+                                Button { edit(TradeDay(id: TradeDay.key(d, "Dhan"), date: d, broker: "Dhan", pnl: 0)) } label: {
                                     HStack {
                                         Text(Cal.dayTitleFormatter.string(from: d))
                                         Spacer()
@@ -120,14 +136,35 @@ struct TradingView: View {
                     Text(Holidays.marketStatus(extra: store.state.userHolidays)).font(.caption2).foregroundColor(Theme.dim)
                 }
             }
-            .sheet(item: $editing) { d in TradeEditView(day: d) }
-            .sheet(isPresented: $reviewing) {
-                ScreenshotReviewView(findings: $findings)
+            .sheet(item: $sheet) { s in
+                switch s {
+                case .edit(let d): TradeEditView(day: d)
+                case .review: ScreenshotReviewView(findings: $findings)
+                }
             }
-            .sheet(isPresented: $router.showImport) {
-                ScreenshotReviewView(findings: $findings)
+            .overlay {
+                if importing {
+                    VStack(spacing: 10) {
+                        ProgressView().tint(Theme.gold)
+                        Text("Reading the screenshot…").font(.footnote).foregroundColor(Theme.dim)
+                    }
+                    .padding(22)
+                    .background(RoundedRectangle(cornerRadius: 16).fill(Theme.cardRaised))
+                }
             }
+            .alert("Could not read that picture", isPresented: Binding(get: { importProblem != nil }, set: { if !$0 { importProblem = nil } })) {
+                Button("OK", role: .cancel) {}
+            } message: { Text(importProblem ?? "") }
             .onChange(of: picked) { items in Task { await importPicked(items) } }
+            .onChange(of: router.showImport) { show in
+                if show { router.showImport = false; sheet = .review }
+            }
+            .onReceive(router.$diagFindings) { list in
+                guard !list.isEmpty else { return }
+                findings += list
+                router.diagFindings = []
+                sheet = .review
+            }
             .task { if autoScan { await scan(force: false) } }
         }
     }
@@ -150,7 +187,7 @@ struct TradingView: View {
             .disabled(scanning)
             Button {
                 let d = Holidays.isTradingDay(Date(), extra: store.state.userHolidays) ? Cal.startOfDay(Date()) : Holidays.previousTradingDay(before: Date())
-                editing = TradeDay(id: TradeDay.key(d, "Dhan"), date: d, broker: "Dhan", pnl: 0)
+                edit(TradeDay(id: TradeDay.key(d, "Dhan"), date: d, broker: "Dhan", pnl: 0))
             } label: { Image(systemName: "square.and.pencil").padding(.horizontal, 6) }
             .buttonStyle(.bordered)
             .tint(Theme.gold)
@@ -166,7 +203,7 @@ struct TradingView: View {
                           detail: "Take a screenshot of your positions after the market closes. Kubera finds it and reads the P&L.")
             }
             ForEach(days.sorted { $0.date > $1.date }) { d in
-                Button { editing = d } label: {
+                Button { edit(d) } label: {
                     HStack {
                         VStack(alignment: .leading, spacing: 2) {
                             Text(Cal.dayTitleFormatter.string(from: d.date)).font(.subheadline.weight(.medium))
@@ -217,17 +254,52 @@ struct TradingView: View {
         if found.isEmpty { store.markSeenAssets([]) }
     }
 
+    /// Pictures chosen with the Screenshot button: always ends in the review sheet (to type the P&L by hand if
+    /// nothing could be read) or in a message saying why not.
     private func importPicked(_ items: [PhotosPickerItem]) async {
         guard !items.isEmpty else { return }
+        importing = true
+        defer { importing = false }
+        var added = 0
+        var failures: [String] = []
         for item in items {
-            guard let data = try? await item.loadTransferable(type: Data.self), let img = UIImage(data: data) else { continue }
-            let reading = await ScreenshotScanner.read(img)
             let id = item.itemIdentifier ?? UUID().uuidString
-            let day = Holidays.tradingDay(forScreenshotAt: Date(), extra: store.state.userHolidays)
-            findings.append(ScreenshotFinding(assetID: id, created: Date(), image: img, reading: reading, tradingDay: day))
+            var img: UIImage?
+            var created: Date?
+            // The photo library knows when the picture was taken (needs Photos access); else the data itself.
+            if let ident = item.itemIdentifier, ScreenshotScanner.authorized(),
+               let asset = PHAsset.fetchAssets(withLocalIdentifiers: [ident], options: nil).firstObject {
+                created = asset.creationDate
+                img = await ScreenshotScanner.image(for: asset)
+            }
+            if img == nil {
+                do {
+                    if let data = try await item.loadTransferable(type: Data.self) { img = UIImage(data: data) }
+                } catch {
+                    Diag.log("import: loadTransferable failed \(error.localizedDescription)")
+                    failures.append(error.localizedDescription)
+                }
+            }
+            guard let image = img else {
+                Diag.log("import: no image for \(id)")
+                continue
+            }
+            let reading = await ScreenshotScanner.read(image)
+            let when = created ?? Date()
+            let day = Holidays.tradingDay(forScreenshotAt: when, extra: store.state.userHolidays)
+            Diag.log("import: \(Int(image.size.width))x\(Int(image.size.height)) taken \(when) broker=\(reading.broker ?? "-") kind=\(reading.kind.rawValue) total=\(reading.total.map { String($0) } ?? "-") conf=\(reading.confidence) notes=\(reading.notes)")
+            if !findings.contains(where: { $0.assetID == id }) {
+                findings.append(ScreenshotFinding(assetID: id, created: when, image: image, reading: reading, tradingDay: day))
+                added += 1
+            }
         }
         picked = []
-        if !findings.isEmpty { reviewing = true }
+        if added > 0 || !findings.isEmpty {
+            sheet = .review
+        } else {
+            importProblem = failures.first.map { "iOS did not hand the picture over (\($0)). Try again, or tap ✎ to type the day's P&L." }
+                ?? "iOS did not hand the picture over. Try again, or tap ✎ to type the day's P&L."
+        }
     }
 }
 

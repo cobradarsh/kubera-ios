@@ -94,7 +94,9 @@ struct SettingsView: View {
             .onAppear {
                 gmailPassword = Keychain.get(Keychain.gmailPassword) == nil ? "" : "••••••••••••••••"
                 claudeKey = Keychain.get(Keychain.claudeKey) == nil ? "" : "••••••••••••••••"
-                smsProbe = SMSReader.probe()
+                smsProbe = SMSReader.probe().contains("open=ok")
+                    ? "Reading your Messages: working (\(store.state.lastSMSRowID) messages looked at)"
+                    : "Kubera cannot open the Messages database: " + SMSReader.probe()
             }
             .onChange(of: checkinHour) { _ in Reminders.refresh(store: store) }
             .onChange(of: checkinMinute) { _ in Reminders.refresh(store: store) }

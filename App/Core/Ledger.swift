@@ -177,6 +177,26 @@ struct Ledger {
         return report
     }
 
+    /// Reads saved notification and e-mail entries again with the current parser and drops the ones it now skips
+    /// (a newer version learned they are news or adverts). Anything you edited is kept. Returns how many went.
+    @discardableResult
+    mutating func revalidateSecondary() -> Int {
+        var removedIDs = Set<String>()
+        state.txns.removeAll { t in
+            guard t.source == .notification || t.source == .email, t.categorySource != .user, t.note == nil, !t.raw.isEmpty else { return false }
+            let m = RawMessage(id: t.id, date: t.date, sender: t.sender ?? "", text: t.raw, source: t.source)
+            let stillTxn = MessageParser.parse(m).contains { if case .txn = $0 { return true }; return false }
+            if !stillTxn { removedIDs.insert(t.id) }
+            return !stillTxn
+        }
+        if !removedIDs.isEmpty {
+            for i in state.txns.indices where state.txns[i].duplicateOf.map({ removedIDs.contains($0) }) ?? false {
+                state.txns[i].duplicateOf = nil
+            }
+        }
+        return removedIDs.count
+    }
+
     func makeCategorizer() -> Categorizer {
         var known: [String: (category: String, name: String?)] = [:]
         for t in state.txns where !t.isDuplicate && learnable(t.categorySource) {
@@ -375,14 +395,47 @@ struct Ledger {
         var totalAssets: Double { bank + broker + assets }
     }
 
-    func netWorth() -> NetWorth {
-        let bank = state.balances.values.filter { $0.kind == .savings && $0.includeInNetWorth }.reduce(0) { $0 + $1.balance }
-        let broker = state.balances.values.filter { $0.kind == .broker && $0.includeInNetWorth }.reduce(0) { $0 + $1.balance }
+    /// Today's net worth, or the one on `date` from each account's balance history (your own items count at their
+    /// current value). A negative bank or broker balance (a debit balance at the broker) is money owed, not a
+    /// smaller asset.
+    func netWorth(asOf date: Date? = nil) -> NetWorth {
+        var bank = 0.0, broker = 0.0, owed = 0.0
+        for b in state.balances.values where b.includeInNetWorth {
+            guard let v = date.map({ balance(b, at: $0) }) ?? b.balance else { continue }
+            switch b.kind {
+            case .savings, .wallet:
+                if v >= 0 { bank += v } else { owed += -v }
+            case .broker:
+                if v >= 0 { broker += v } else { owed += -v }
+            case .creditCard, .loan:
+                owed += abs(v)
+            }
+        }
         let assets = state.manual.filter { !$0.kind.isLiability }.reduce(0) { $0 + $1.value }
-        let cardsAuto = state.balances.values.filter { ($0.kind == .creditCard || $0.kind == .loan) && $0.includeInNetWorth }
-            .reduce(0) { $0 + abs($1.balance) }
-        let liabilities = state.manual.filter { $0.kind.isLiability }.reduce(0) { $0 + $1.value } + cardsAuto
+        let liabilities = state.manual.filter { $0.kind.isLiability }.reduce(0) { $0 + $1.value } + owed
         return NetWorth(bank: bank, broker: broker, assets: assets, liabilities: liabilities)
+    }
+
+    /// The last known balance at or before `date` (nil when the account's history starts later).
+    func balance(_ b: AccountBalance, at date: Date) -> Double? {
+        if b.asOf <= date { return b.balance }
+        return b.history.last(where: { $0.date <= date })?.balance
+    }
+
+    /// Net worth on the 1st of each month since the first balance message, and today.
+    func netWorthHistory(now: Date = Date()) -> [NetWorthSnapshot] {
+        let firsts = state.balances.values.flatMap { $0.history.map { $0.date } } + state.balances.values.map { $0.asOf }
+        guard let earliest = firsts.min() else { return [] }
+        var month = Cal.startOfMonth(Cal.addMonths(1, to: earliest))
+        var out: [NetWorthSnapshot] = []
+        while month <= now {
+            let nw = netWorth(asOf: month)
+            out.append(NetWorthSnapshot(date: month, assets: nw.totalAssets, liabilities: nw.liabilities))
+            month = Cal.addMonths(1, to: month)
+        }
+        let today = netWorth()
+        out.append(NetWorthSnapshot(date: now, assets: today.totalAssets, liabilities: today.liabilities))
+        return out
     }
 
     /// One snapshot per month, taken on the first day the app runs in that month.

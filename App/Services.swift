@@ -143,22 +143,31 @@ enum ScreenshotScanner {
         return s == .authorized || s == .limited
     }
 
-    /// Screenshots taken since `since` that look like a broker's positions or holdings screen.
-    static func scan(since: Date, skip: Set<String>, holidays: [Holiday], limit: Int = 30) async -> [ScreenshotFinding] {
+    /// Pictures taken since `since` that are screenshots (tagged so by iOS, or exactly the size of this screen:
+    /// screenshots saved by tweaks are not always tagged) and look like a broker's positions or holdings screen.
+    static func scan(since: Date, skip: Set<String>, holidays: [Holiday], limit: Int = 40) async -> [ScreenshotFinding] {
         guard authorized() else { return [] }
-        // The Screenshots smart album, newest first (a plain date predicate; no bitmask predicate needed).
-        guard let album = PHAssetCollection.fetchAssetCollections(with: .smartAlbum, subtype: .smartAlbumScreenshots, options: nil).firstObject else { return [] }
         let opts = PHFetchOptions()
         opts.predicate = NSPredicate(format: "creationDate > %@", since as NSDate)
         opts.sortDescriptors = [NSSortDescriptor(key: "creationDate", ascending: false)]
-        opts.fetchLimit = limit
-        let assets = PHAsset.fetchAssets(in: album, options: opts)
+        opts.fetchLimit = 200
+        let assets = PHAsset.fetchAssets(with: .image, options: opts)
+        let screen = await MainActor.run { UIScreen.main.nativeBounds.size }
+        let sw = Int(min(screen.width, screen.height)), sh = Int(max(screen.width, screen.height))
         var list: [PHAsset] = []
-        assets.enumerateObjects { a, _, _ in if !skip.contains(a.localIdentifier) { list.append(a) } }
+        assets.enumerateObjects { a, _, stop in
+            guard !skip.contains(a.localIdentifier) else { return }
+            let tagged = a.mediaSubtypes.contains(.photoScreenshot)
+            let screenSized = min(a.pixelWidth, a.pixelHeight) == sw && max(a.pixelWidth, a.pixelHeight) == sh
+            if tagged || screenSized { list.append(a) }
+            if list.count >= limit { stop.pointee = true }
+        }
+        Diag.log("screenshot scan: \(assets.count) pictures since \(since), \(list.count) screenshots to read")
         var out: [ScreenshotFinding] = []
         for a in list {
-            guard let img = await image(for: a) else { continue }
+            guard let img = await image(for: a) else { Diag.log("  \(a.localIdentifier.prefix(8)) no image"); continue }
             let reading = await read(img)
+            Diag.log("  \(a.localIdentifier.prefix(8)) \(a.pixelWidth)x\(a.pixelHeight) broker=\(reading.broker ?? "-") kind=\(reading.kind.rawValue) total=\(reading.total.map { String($0) } ?? "-") conf=\(String(format: "%.2f", reading.confidence))")
             guard reading.kind != .unknown || reading.broker != nil, reading.total != nil || reading.currentValue != nil else { continue }
             let created = a.creationDate ?? Date()
             out.append(ScreenshotFinding(assetID: a.localIdentifier, created: created, image: img, reading: reading,

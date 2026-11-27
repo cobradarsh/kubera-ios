@@ -145,6 +145,24 @@ enum Diag {
                 let r = TradeOCRParser.read(lines)
                 log("reading broker=\(r.broker ?? "-") kind=\(r.kind.rawValue) total=\(r.total.map { String($0) } ?? "-") current=\(r.currentValue.map { String($0) } ?? "-") conf=\(r.confidence) rows=\(r.positions.count) notes=\(r.notes)")
             }
+        case "importfile":
+            // Same path as a picture chosen with the Screenshot button, from a file on the phone.
+            guard let p = a["path"], let img = UIImage(contentsOfFile: p) else { log("importfile: no image"); return }
+            router.tab = .invest
+            let created = (try? FileManager.default.attributesOfItem(atPath: p)[.creationDate] as? Date) ?? Date()
+            Task {
+                let r = await ScreenshotScanner.read(img)
+                log("importfile reading broker=\(r.broker ?? "-") kind=\(r.kind.rawValue) total=\(r.total.map { String($0) } ?? "-") conf=\(r.confidence) rows=\(r.positions.map { "\($0.symbol)=\($0.pnl)" }) notes=\(r.notes)")
+                try? await Task.sleep(nanoseconds: 600_000_000)
+                router.diagFindings = [ScreenshotFinding(assetID: "file:" + p, created: created, image: img, reading: r,
+                                                         tradingDay: Holidays.tradingDay(forScreenshotAt: created, extra: store.state.userHolidays))]
+            }
+        case "scanshots":
+            Task {
+                let since = Cal.addDays(-(Int(a["days"] ?? "3") ?? 3), to: Date())
+                let found = await ScreenshotScanner.scan(since: since, skip: [], holidays: store.state.userHolidays)
+                log("scanshots found \(found.count): " + found.map { "\($0.reading.broker ?? "-") \($0.reading.total.map { String($0) } ?? "-") day=\(Cal.dayKey($0.tradingDay))" }.joined(separator: "; "))
+            }
         case "holiday":
             let d = a["date"].flatMap { Cal.fromDayKey($0) } ?? Date()
             log("holiday \(Cal.dayKey(d)) trading=\(Holidays.isTradingDay(d, extra: store.state.userHolidays)) status=\(Holidays.marketStatus(at: d, extra: store.state.userHolidays))")

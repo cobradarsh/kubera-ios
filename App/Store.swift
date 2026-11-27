@@ -35,8 +35,14 @@ final class Store: ObservableObject {
                 problem = "The saved data could not be read and was kept aside as \(aside.lastPathComponent)."
             }
         }
-        ledger = Ledger(state: state, db: db)
+        var l = Ledger(state: state, db: db)
+        let dropped = l.revalidateSecondary()
+        ledger = l
         loadProblem = problem
+        if dropped > 0 {
+            Diag.log("dropped \(dropped) notification/e-mail entries the current parser skips")
+            saveNow()
+        }
     }
 
     var state: LedgerState { ledger.state }
@@ -180,8 +186,10 @@ final class Store: ObservableObject {
                 if let a = await free.lookup(name) {
                     mutate { $0.applyLookup(key: key, category: a.category, confident: a.confident, note: a.note, source: .web, person: a.person, name: a.name) }
                     pending[key] = nil
+                    Diag.log("lookup \(name) -> \(a.person ? "person" : (a.category ?? "-")) confident=\(a.confident) \(a.note ?? "")")
                 } else {
                     mutate { $0.markLookup(key: key, state: .failed) }
+                    Diag.log("lookup \(name) -> nothing")
                 }
                 try? await Task.sleep(nanoseconds: 1_100_000_000) // OpenStreetMap allows one request a second
             }

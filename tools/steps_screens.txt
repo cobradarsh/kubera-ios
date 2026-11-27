@@ -1,0 +1,46 @@
+# Kubera: every main screen, with the parser's coverage first
+diag unparsed
+diag patterns
+diag state
+diag tab?name=expenses
+sleep 3
+snap expenses 2
+diag chart?kind=donut
+sleep 2
+snap chart-donut 2
+diag chart?kind=cumulative
+sleep 2
+snap chart-cumulative 2
+diag chart?kind=calendar
+sleep 2
+snap chart-calendar 2
+diag chart?kind=categories
+sleep 2
+snap chart-categories 2
+diag chart?kind=when
+sleep 2
+snap chart-when 2
+diag chart?kind=daily
+diag checkin
+sleep 2
+snap checkin 2
+diag checkin?show=0
+sleep 1
+diag tab?name=invest
+sleep 3
+snap invest 2
+diag tab?name=networth
+sleep 3
+snap networth 2
+diag tab?name=more
+sleep 2
+snap more 2
+diag mantra
+sleep 2
+snap mantra 2
+diag mantra?show=0
+diag splash
+snap splash 1
+diag splash?show=0
+diag tab?name=expenses
+log 400

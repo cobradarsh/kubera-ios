@@ -160,7 +160,7 @@ struct SummaryCard: View {
                 StatTile(title: "Per day", value: Money.compact(perDay))
                 StatTile(title: isCurrent ? "Projected" : "Month", value: Money.compact(projected))
                 StatTile(title: "Income", value: Money.compact(income), color: income > 0 ? Theme.profit : Theme.text)
-                StatTile(title: "To trading", value: Money.compact(invested), color: Theme.gold)
+                StatTile(title: invested >= 0 ? "To trading" : "From trading", value: Money.compact(abs(invested)), color: Theme.gold)
             }
         }
         .card(padding: 16)

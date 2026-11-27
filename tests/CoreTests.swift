@@ -284,11 +284,27 @@ struct CoreTests {
         let s = SpendStats(txns: l.state.txns, categories: l.categories)
         let march = s.inMonth(base)
         check(abs(s.spent(march) - (4500 + 649 + 50 + 50 + 321 + 40)) < 0.01, "March spending (\(s.spent(march)))")
+        // A saved notification that a newer parser recognises as news is dropped on the next launch.
+        var news = Txn(id: "ntf:news", date: base, amount: 1634.33, direction: .credit)
+        news.source = .notification
+        news.sender = "com.dhan.live"
+        news.raw = "Update on FII-DII Activity · FIIs buy ₹1,634.33 Cr"
+        l.state.txns.append(news)
+        check(l.revalidateSecondary() == 1 && !l.state.txns.contains { $0.id == "ntf:news" }, "saved market news dropped on revalidation")
         var nw = Ledger(state: LedgerState(), db: db)
         nw.state.manual = [ManualItem(name: "Gold", kind: .gold, value: 100000), ManualItem(name: "Loan", kind: .loan, value: 40000)]
         nw.updateBalance(institution: "HDFC Bank", last4: "1234", kind: .savings, amount: 50000, asOf: Date())
         nw.updateBalance(institution: "Dhan", last4: nil, kind: .broker, amount: 1000, asOf: Date())
         check(nw.netWorth().net == 111000, "net worth = bank + broker + assets - liabilities")
+        nw.updateBalance(institution: "Kotak Securities", last4: nil, kind: .broker, amount: -2000, asOf: Date())
+        let w = nw.netWorth()
+        check(w.broker == 1000 && w.liabilities == 42000 && w.net == 109000, "a broker debit balance counts as owed, not as a smaller asset")
+        var hist = Ledger(state: LedgerState(), db: db)
+        hist.updateBalance(institution: "HDFC Bank", last4: "1234", kind: .savings, amount: 1000, asOf: Cal.make(2026, 9, 28, 23, 59)!)
+        hist.updateBalance(institution: "HDFC Bank", last4: "1234", kind: .savings, amount: 5000, asOf: Cal.make(2026, 10, 15, 23, 59)!)
+        hist.updateBalance(institution: "HDFC Bank", last4: "1234", kind: .savings, amount: 7000, asOf: Cal.make(2026, 11, 20, 23, 59)!)
+        let h = hist.netWorthHistory(now: Cal.make(2026, 11, 27, 12, 0)!)
+        check(h.count == 3 && h[0].net == 1000 && h[1].net == 5000 && h[2].net == 7000, "net worth on the 1st of each month from balance history (\(h.map { $0.net }))")
     }
 
     // MARK: Holidays
@@ -338,6 +354,29 @@ struct CoreTests {
         check(r.total == -2345.5, "total P&L with sign (\(r.total.map { String($0) } ?? "nil"))")
         check(r.positions.count == 2 && r.positions.first?.pnl == -1845.5, "position rows")
         check(r.confidence >= 0.7, "rows adding up raise confidence")
+        // Dhan's Positions screen layout (made-up values): "Overall P&L" over "₹ 12,345.00 on 1 positions" in green,
+        // a closed position row, quantity and average price below it.
+        let dhan = [
+            OCRLine(text: "11/27 Fri", x: 0.13, y: 0.01, w: 0.12, h: 0.012),
+            OCRLine(text: "20:46:10", x: 0.13, y: 0.025, w: 0.15, h: 0.015),
+            OCRLine(text: "Positions", x: 0.18, y: 0.083, w: 0.2, h: 0.02),
+            OCRLine(text: "Orders", x: 0.41, y: 0.083, w: 0.13, h: 0.02),
+            OCRLine(text: "Overall P&L", x: 0.06, y: 0.14, w: 0.14, h: 0.012),
+            OCRLine(text: "₹ 12,345.00 on 1 positions", x: 0.06, y: 0.168, w: 0.4, h: 0.02, tint: 1),
+            OCRLine(text: "Your P&L for today, Verified by Dhan. Tap to share.", x: 0.1, y: 0.214, w: 0.6, h: 0.012),
+            OCRLine(text: "All 1", x: 0.04, y: 0.34, w: 0.12, h: 0.015),
+            OCRLine(text: "Closed Positions", x: 0.03, y: 0.403, w: 0.2, h: 0.012),
+            OCRLine(text: "SENSEX 03 DEC 83100 PUT", x: 0.05, y: 0.44, w: 0.45, h: 0.016),
+            OCRLine(text: "12,345.00", x: 0.79, y: 0.44, w: 0.16, h: 0.016, tint: 1),
+            OCRLine(text: "Intraday W Qty. 1,000 x 150.25 BSE", x: 0.05, y: 0.468, w: 0.5, h: 0.013),
+            OCRLine(text: "Closed", x: 0.86, y: 0.468, w: 0.09, h: 0.013),
+        ]
+        let rd = TradeOCRParser.read(dhan)
+        check(rd.broker == "Dhan" && rd.kind == .positions && rd.total == 12345 && rd.positions.first?.pnl == 12345 && rd.confidence >= 0.7,
+              "Dhan positions screen (total \(rd.total.map { String($0) } ?? "nil"), rows \(rd.positions.count), conf \(rd.confidence))")
+        var misread = dhan
+        misread[5].text = "2 12,345.00 on 1 positions"   // rupee sign read as a 2
+        check(TradeOCRParser.read(misread).total == 12345, "a rupee sign read as a digit is not the total")
         let green = [OCRLine(text: "Kite", x: 0.1, y: 0.02, w: 0.1, h: 0.02), OCRLine(text: "Positions", x: 0.1, y: 0.06, w: 0.2, h: 0.02),
                      OCRLine(text: "Total P&L", x: 0.1, y: 0.2, w: 0.2, h: 0.02), OCRLine(text: "3,200.00", x: 0.55, y: 0.2, w: 0.3, h: 0.03, tint: 1)]
         check(TradeOCRParser.read(green).total == 3200, "colour gives the sign when no +/- is shown")
