@@ -1,0 +1,39 @@
+# Kubera: check after an update. The saved data loads, a sync runs with the new rules, every main screen draws.
+diag state
+diag sync
+sleep 6
+diag patterns
+diag unparsed
+diag month
+diag tab?name=expenses
+sleep 3
+snap expenses 2
+diag chart?kind=daily
+sleep 2
+snap chart-daily 2
+diag chart?kind=donut
+sleep 2
+snap chart-donut 2
+diag checkin
+sleep 2
+snap checkin 2
+diag checkin?show=0
+sleep 1
+diag budgets
+sleep 2
+snap budgets 2
+diag dismiss
+sleep 1
+diag tab?name=invest
+sleep 3
+snap invest 2
+diag tab?name=networth
+sleep 3
+snap networth 2
+diag tab?name=more
+sleep 2
+snap more 2
+diag tab?name=expenses
+diag reminder
+sleep 2
+log 160
