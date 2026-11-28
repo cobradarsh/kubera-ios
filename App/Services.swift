@@ -103,30 +103,119 @@ enum Reminders {
 
 // MARK: - Face ID lock
 
+/// Locks at launch and after more than two minutes away. The Face ID prompt, Control Center and the app switcher
+/// all make the app inactive and active again, so the time away is used once and only one prompt runs at a time.
+/// Sheets sit above the lock screen, so locking closes them; a link that comes in meanwhile waits for Face ID.
 @MainActor
 final class AppLock: ObservableObject {
     static let shared = AppLock()
     @Published var locked = false
     private var backgroundedAt: Date?
+    private var started = false
+    private var authenticating = false
+    private var promptWhenActive = false
+    private var heldLink: URL?
+    private var cover: UIWindow?
+
+    /// On in Settings, and never while the test hooks drive the app.
+    private var isOn: Bool { Pref.d.bool(forKey: Pref.lockEnabled) && !Diag.enabled }
 
     func appear() {
-        if Pref.d.bool(forKey: Pref.lockEnabled) && !Diag.enabled { locked = true; unlock() }
+        started = true
+        if isOn { lock(promptNow: UIApplication.shared.applicationState == .active) }
     }
 
-    func didBackground() { backgroundedAt = Date() }
+    /// Out of the front for a moment (app switcher, Control Center): cover the screen. While locked the lock screen
+    /// already covers it, and the Face ID prompt shows over the lock screen.
+    func didResignActive() {
+        if isOn && !locked { setCover(true) }
+    }
+
+    func didBackground() {
+        if isOn { setCover(true) }
+        if backgroundedAt == nil { backgroundedAt = Date() }
+    }
 
     func didForeground() {
-        guard Pref.d.bool(forKey: Pref.lockEnabled), !Diag.enabled else { return }
-        if let b = backgroundedAt, Date().timeIntervalSince(b) > 120 { locked = true; unlock() }
+        let away = backgroundedAt.map { Date().timeIntervalSince($0) } ?? 0
+        backgroundedAt = nil
+        let due = promptWhenActive
+        promptWhenActive = false
+        if isOn {
+            if away > 120 { lock(promptNow: true) } else if due { unlock() }
+        }
+        setCover(false)
+    }
+
+    /// Keeps a link that comes in while locked, or while a lock is due (at launch, or back after two minutes away).
+    func hold(_ url: URL) -> Bool {
+        let due = locked || !started || (backgroundedAt.map { Date().timeIntervalSince($0) > 120 } ?? false)
+        guard isOn, due else { return false }
+        heldLink = url
+        return true
     }
 
     func unlock() {
+        guard locked, !authenticating else { return }
         let ctx = LAContext()
         var err: NSError?
-        guard ctx.canEvaluatePolicy(.deviceOwnerAuthentication, error: &err) else { locked = false; return }
+        guard ctx.canEvaluatePolicy(.deviceOwnerAuthentication, error: &err) else { opened(); return }
+        authenticating = true
         ctx.evaluatePolicy(.deviceOwnerAuthentication, localizedReason: "Unlock Kubera") { ok, _ in
-            Task { @MainActor in if ok { AppLock.shared.locked = false } }
+            Task { @MainActor in
+                AppLock.shared.authenticating = false
+                if ok { AppLock.shared.opened() }
+            }
         }
+    }
+
+    private func lock(promptNow: Bool) {
+        // With no passcode on the phone there is nothing to unlock with.
+        guard LAContext().canEvaluatePolicy(.deviceOwnerAuthentication, error: nil) else { opened(); return }
+        locked = true
+        closeSheets()
+        if promptNow { unlock() } else { promptWhenActive = true }
+    }
+
+    private func opened() {
+        locked = false
+        if let u = heldLink { heldLink = nil; Router.shared.open(u) }
+    }
+
+    /// Sheets (and the keyboard) would stay above the lock screen.
+    private func closeSheets() {
+        _ = UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
+        let r = Router.shared
+        r.showCheckin = false; r.showMantra = false; r.showBudgets = false; r.showImport = false
+        for case let scene as UIWindowScene in UIApplication.shared.connectedScenes {
+            for w in scene.windows where w !== cover && w.rootViewController?.presentedViewController != nil {
+                w.rootViewController?.dismiss(animated: false)
+            }
+        }
+    }
+
+    /// Black with the emblem, in a window above every sheet, so the app-switcher picture shows nothing.
+    private func setCover(_ on: Bool) {
+        guard on else { cover?.isHidden = true; cover = nil; return }
+        guard cover == nil, let scene = UIApplication.shared.connectedScenes.compactMap({ $0 as? UIWindowScene }).first else { return }
+        let w = UIWindow(windowScene: scene)
+        w.windowLevel = UIWindow.Level(rawValue: UIWindow.Level.alert.rawValue + 1)
+        w.overrideUserInterfaceStyle = .dark
+        let vc = UIViewController()
+        vc.view.backgroundColor = .black
+        let emblem = UIImageView(image: UIImage(named: "Emblem"))
+        emblem.contentMode = .scaleAspectFit
+        emblem.translatesAutoresizingMaskIntoConstraints = false
+        vc.view.addSubview(emblem)
+        NSLayoutConstraint.activate([
+            emblem.widthAnchor.constraint(equalToConstant: 90),
+            emblem.heightAnchor.constraint(equalToConstant: 90),
+            emblem.centerXAnchor.constraint(equalTo: vc.view.centerXAnchor),
+            emblem.centerYAnchor.constraint(equalTo: vc.view.centerYAnchor),
+        ])
+        w.rootViewController = vc
+        w.isHidden = false
+        cover = w
     }
 }
 

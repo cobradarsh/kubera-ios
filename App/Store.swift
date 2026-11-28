@@ -122,69 +122,103 @@ final class Store: ObservableObject {
         }
         if let n = inbox { messages += n.messages }
 
-        var mailMessages: [RawMessage] = []
+        var fetched: MailSync.Result?
+        let mailValidity = ledger.state.mailUIDValidity
+        let mailUID = ledger.state.mailHighestUID
         if Pref.d.bool(forKey: Pref.mailEnabled) {
             let last = Pref.d.double(forKey: Pref.lastMailSync)
             if reason == "manual" || Date().timeIntervalSince1970 - last > 1800 {
                 status = "Reading Gmail…"
                 do {
-                    mailMessages = try await MailSync.fetch(state: ledger.state)
+                    fetched = try await MailSync.fetch(uidValidity: mailValidity, highestUID: mailUID)
                     Pref.d.set(Date().timeIntervalSince1970, forKey: Pref.lastMailSync)
                 } catch {
                     notes.append("Gmail: \(error.localizedDescription)")
                 }
             }
         }
+        let mail = fetched
 
         // Parsing hundreds of messages takes a moment: do it on a copy off the main thread, then swap it in
         // (or redo it here if something was edited meanwhile, so that edit is kept).
-        let all = messages + mailMessages
-        let work: (inout Ledger) -> IngestReport = { l in
-            if let s = sms, s.error == nil { l.state.lastSMSRowID = s.maxRowID }
-            if let n = inbox { l.state.inboxOffsets = n.offsets }
+        // Cursors are saved with the messages they cover, and move only if nothing moved them during the read
+        // (a restore, "Read all SMS again"); then `stale` is true and those messages are read again from there.
+        let all = messages + (mail?.messages ?? [])
+        let work: (inout Ledger) -> (IngestReport, Bool) = { l in
+            var moved = false
+            if let s = sms, s.error == nil {
+                if l.state.lastSMSRowID == lastRow { l.state.lastSMSRowID = s.maxRowID } else { moved = true }
+            }
+            if let n = inbox {
+                if l.state.inboxOffsets == offsets { l.state.inboxOffsets = n.offsets } else { moved = true }
+            }
+            if let m = mail {
+                if l.state.mailUIDValidity == mailValidity && l.state.mailHighestUID == mailUID {
+                    // A new UIDVALIDITY numbers the mailbox afresh: its highest UID replaces the old one.
+                    l.state.mailHighestUID = m.uidValidity == mailValidity ? max(mailUID, m.highestUID) : m.highestUID
+                    l.state.mailUIDValidity = m.uidValidity
+                } else {
+                    moved = true
+                }
+            }
             let r = l.ingest(all)
             l.snapshotIfNeeded()
-            return r
+            return (r, moved)
         }
         let before = version
         let copy = ledger
-        let (done, bgReport) = await withCheckedContinuation { (cont: CheckedContinuation<(Ledger, IngestReport), Never>) in
+        let (done, bg) = await withCheckedContinuation { (cont: CheckedContinuation<(Ledger, (IngestReport, Bool)), Never>) in
             DispatchQueue.global(qos: .userInitiated).async {
                 var l = copy
                 let r = work(&l)
                 cont.resume(returning: (l, r))
             }
         }
-        var report = bgReport
+        var (report, stale) = bg
         if version == before {
             ledger = done
             version += 1
             scheduleSave()
         } else {
-            mutate { l in report = work(&l) }
+            mutate { l in (report, stale) = work(&l) }
         }
         lastReport = report
         status = notes.isEmpty ? (report.added > 0 ? "\(report.added) new · \(uncategorized.count) to sort" : "Up to date") : notes.joined(separator: "\n")
         Diag.log("sync(\(reason)) msgs=\(report.messages) added=\(report.added) dup=\(report.duplicates) bal=\(report.balances) ignored=\(report.ignored) other=\(report.other) unsorted=\(uncategorized.count) notes=\(notes)")
         Reminders.refresh(store: self)
         Reminders.checkBudgets(store: self, newIDs: report.addedIDs)
-        if !report.lookups.isEmpty || ledger.state.txns.contains(where: { $0.lookupState == .pending }) {
+        // Not from background refresh: iOS suspends the app as soon as sync returns, which cuts the requests off.
+        if reason != "background", (Pref.d.bool(forKey: Pref.webLookup) && !pendingLookups().isEmpty) || claudeDue() {
             Task { await self.runLookups(useClaude: false) }
+        }
+        if stale {
+            // Read again from the moved cursors (the task runs once this sync has returned).
+            Task { await self.sync(reason: "manual") }
         }
     }
 
     // MARK: Lookups
 
     /// Free lookups for unknown businesses; then Claude (if switched on, at most once an hour unless asked).
-    func runLookups(useClaude: Bool) async {
+    /// `retryFailed` gives payees the web found nothing for another try.
+    func runLookups(useClaude: Bool, retryFailed: Bool = false) async {
         guard !lookingUp else { return }
         lookingUp = true
         defer { lookingUp = false }
-        let city = Pref.d.string(forKey: Pref.lookupCity) ?? ""
-        var pending: [String: String] = [:]   // key -> name
-        for t in ledger.state.txns where t.lookupState == .pending && !t.isDuplicate && t.category == Category.uncategorized {
-            if pending[t.counterpartyKey] == nil { pending[t.counterpartyKey] = t.counterparty }
+        if retryFailed {
+            let people = personKeys
+            let again: (Txn) -> Bool = { t in
+                t.lookupState == .failed && !t.isDuplicate && t.category == Category.uncategorized && !people.contains(t.counterpartyKey)
+                    && Categorizer.isLookupable(name: t.counterparty, vpa: t.vpa)
+            }
+            if ledger.state.txns.contains(where: again) {
+                mutate { l in
+                    for i in l.state.txns.indices where again(l.state.txns[i]) { l.state.txns[i].lookupState = .pending }
+                }
+            }
         }
+        let city = Pref.d.string(forKey: Pref.lookupCity) ?? ""
+        var pending = pendingLookups()   // key -> name
         if Pref.d.bool(forKey: Pref.webLookup) && !pending.isEmpty {
             let free = FreeLookup(city: city)
             var n = 0
@@ -204,29 +238,78 @@ final class Store: ObservableObject {
         }
         let claudeOn = Pref.d.bool(forKey: Pref.claudeEnabled)
         let lastClaude = Pref.d.double(forKey: Pref.lastClaudeRun)
+        var problem: String?
         if claudeOn, useClaude || Date().timeIntervalSince1970 - lastClaude > 3600, let key = Keychain.get(Keychain.claudeKey), !key.isEmpty {
-            await runClaude(apiKey: key, city: city)
+            problem = await runClaude(apiKey: key, city: city, again: useClaude)
         }
-        lookupStatus = nil
+        lookupStatus = problem
+        if let p = problem {
+            // Shown for a while (Settings, check-in), then the check-in button comes back.
+            Task {
+                try? await Task.sleep(nanoseconds: 30_000_000_000)
+                if self.lookupStatus == p { self.lookupStatus = nil }
+            }
+        }
         Reminders.refresh(store: self)
     }
 
-    private func runClaude(apiKey: String, city: String) async {
+    /// Payee keys marked as a person, by the categoriser or a lookup. These are never sent anywhere.
+    private var personKeys: Set<String> {
+        Set(ledger.state.txns.filter { $0.isPerson || $0.suggestion == Category.people }.map { $0.counterpartyKey })
+    }
+
+    /// Key -> name of the payees waiting for a free lookup. The name is checked again with today's rules: an older
+    /// version may have queued a lookup for what now counts as a person's name.
+    private func pendingLookups() -> [String: String] {
+        let people = personKeys
+        var pending: [String: String] = [:]
+        for t in ledger.state.txns where t.lookupState == .pending && !t.isDuplicate && t.category == Category.uncategorized
+            && !people.contains(t.counterpartyKey) && Categorizer.isLookupable(name: t.counterparty, vpa: t.vpa) {
+            if pending[t.counterpartyKey] == nil { pending[t.counterpartyKey] = t.counterparty }
+        }
+        return pending
+    }
+
+    /// Keys Claude was already asked about (newest last), so a 'low' answer is not bought again every hour.
+    private var claudeAsked: [String] {
+        get { Pref.d.stringArray(forKey: Pref.claudeAsked) ?? [] }
+        set { Pref.d.set(Array(newValue.suffix(2000)), forKey: Pref.claudeAsked) }
+    }
+
+    /// Up to 25 unsorted payees for Claude: with a usable name and not people. The hourly run leaves out payees
+    /// Claude was asked about before; `again` (you asked) takes them too.
+    private func claudeItems(again: Bool = false) -> [ClaudeLookup.Item] {
+        let people = personKeys
+        let asked: Set<String> = again ? [] : Set(claudeAsked)
         var items: [ClaudeLookup.Item] = []
         var seen = Set<String>()
-        for t in uncategorized where !t.isPerson && !t.counterpartyKey.isEmpty && !seen.contains(t.counterpartyKey) {
+        for t in uncategorized where !t.counterpartyKey.isEmpty && !people.contains(t.counterpartyKey)
+            && !asked.contains(t.counterpartyKey) && !seen.contains(t.counterpartyKey) {
             guard Categorizer.isLookupable(name: t.counterparty, vpa: t.vpa) else { continue }
             seen.insert(t.counterpartyKey)
             items.append(.init(key: t.counterpartyKey, name: t.counterparty))
             if items.count >= 25 { break }
         }
-        guard !items.isEmpty else { return }
+        return items
+    }
+
+    /// Claude is on with a key, its hour is up and some payee is left for it.
+    private func claudeDue() -> Bool {
+        Pref.d.bool(forKey: Pref.claudeEnabled) && Date().timeIntervalSince1970 - Pref.d.double(forKey: Pref.lastClaudeRun) > 3600
+            && !claudeItems().isEmpty && !(Keychain.get(Keychain.claudeKey) ?? "").isEmpty
+    }
+
+    /// Returns the error to show, if the call failed.
+    private func runClaude(apiKey: String, city: String, again: Bool) async -> String? {
+        let items = claudeItems(again: again)
+        guard !items.isEmpty else { return nil }
         lookupStatus = "Asking Claude about \(items.count) payee\(items.count == 1 ? "" : "s")…"
         let model = Pref.d.string(forKey: Pref.claudeModel) ?? "claude-opus-5-5"
         let c = ClaudeLookup(apiKey: apiKey, model: model, city: city, categories: categories)
+        // Counted before sending, so a call that fails (and may still be billed) is not repeated on every sync.
+        Pref.d.set(Date().timeIntervalSince1970, forKey: Pref.lastClaudeRun)
         do {
             let results = try await c.categorize(items)
-            Pref.d.set(Date().timeIntervalSince1970, forKey: Pref.lastClaudeRun)
             mutate { l in
                 for r in results {
                     let person = r.category == Category.people
@@ -234,10 +317,13 @@ final class Store: ObservableObject {
                                   note: "Claude: " + r.reason, source: .claude, person: person, name: r.display_name)
                 }
             }
+            let sent = items.map { $0.key }
+            claudeAsked = claudeAsked.filter { !sent.contains($0) } + sent
             Diag.log("claude ok \(results.count) results")
+            return nil
         } catch {
-            lookupStatus = error.localizedDescription
             Diag.log("claude failed \(error.localizedDescription)")
+            return error.localizedDescription
         }
     }
 
@@ -354,6 +440,7 @@ final class Store: ObservableObject {
         guard let data = try? Data(contentsOf: url), let st = try? JSONDecoder().decode(LedgerState.self, from: data) else { return false }
         _ = exportBackup() // the current data, kept in tmp just in case
         ledger = Ledger(state: st, db: db)
+        version += 1 // a sync running now redoes its work on the restored data instead of putting the old back
         saveNow()
         return true
     }
@@ -361,24 +448,27 @@ final class Store: ObservableObject {
 
 /// Gmail over IMAP (optional; address + app password in Settings).
 enum MailSync {
-    static func fetch(state: LedgerState) async throws -> [RawMessage] {
+    struct Result {
+        var messages: [RawMessage]
+        var uidValidity: UInt32
+        var highestUID: UInt32
+    }
+
+    /// Alert mail above the saved cursor (nil when Gmail is not set up). The cursor is not saved here: sync saves it
+    /// together with the mails it covers.
+    static func fetch(uidValidity: UInt32, highestUID: UInt32) async throws -> Result? {
         guard let address = Pref.d.string(forKey: Pref.mailAddress), !address.isEmpty,
-              let password = Keychain.get(Keychain.gmailPassword), !password.isEmpty else { return [] }
+              let password = Keychain.get(Keychain.gmailPassword), !password.isEmpty else { return nil }
         let client = GmailIMAPClient(email: address, appPassword: password)
         let since = Cal.addMonths(-6, to: Cal.startOfMonth(Date()))
         let query = GmailIMAPClient.defaultAlertQuery(since: since)
-        let sameValidity = state.mailUIDValidity != 0
-        let r = try await client.fetch(query: query, sinceUID: sameValidity ? state.mailHighestUID : nil,
-                                       uidValidity: sameValidity ? state.mailUIDValidity : nil, limit: 400)
-        await MainActor.run {
-            Store.shared.mutate { l in
-                l.state.mailUIDValidity = r.uidValidity
-                l.state.mailHighestUID = max(l.state.mailHighestUID, r.highestUID)
-            }
-        }
-        return r.messages.map { m in
+        let sameValidity = uidValidity != 0
+        let r = try await client.fetch(query: query, sinceUID: sameValidity ? highestUID : nil,
+                                       uidValidity: sameValidity ? uidValidity : nil, limit: 400)
+        let messages: [RawMessage] = r.messages.map { m in
             RawMessage(id: "mail:\(r.uidValidity):\(m.uid)", date: m.date ?? Date(), sender: m.from,
                        text: m.subject + " · " + m.text.prefix(1500), source: .email)
         }
+        return Result(messages: messages, uidValidity: r.uidValidity, highestUID: r.highestUID)
     }
 }

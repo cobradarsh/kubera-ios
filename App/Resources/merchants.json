@@ -16,7 +16,7 @@
     {"n": "Spencer's", "c": "groceries", "a": ["spencers", "spencer s retail", "spencer s"]},
     {"n": "Nature's Basket", "c": "groceries", "a": ["natures basket", "nature s basket"]},
     {"n": "Star Bazaar", "c": "groceries", "a": ["star bazaar", "star market", "trent hypermarket"]},
-    {"n": "Ratnadeep", "c": "groceries", "a": ["ratnadeep"]},
+    {"n": "Ratnadeep", "c": "groceries", "a": ["ratnadeep super market", "ratnadeep supermarket"]},
     {"n": "Namdhari's", "c": "groceries", "a": ["namdhari", "namdharis"]},
     {"n": "KPN Fresh", "c": "groceries", "a": ["kpn fresh", "kpn farm fresh"]},
     {"n": "Country Delight", "c": "groceries", "a": ["country delight"]},
@@ -95,7 +95,7 @@
     {"n": "Shoppers Stop", "c": "shopping", "a": ["shoppers stop"]},
     {"n": "Pantaloons", "c": "shopping", "a": ["pantaloons"]},
     {"n": "H&M", "c": "shopping", "a": ["hennes mauritz", "h m hennes", "h m retail"]},
-    {"n": "Zara", "c": "shopping", "a": ["zara", "inditex"]},
+    {"n": "Zara", "c": "shopping", "a": ["zara india", "zara com", "inditex"]},
     {"n": "Uniqlo", "c": "shopping", "a": ["uniqlo"]},
     {"n": "Rare Rabbit", "c": "shopping", "a": ["rare rabbit", "rarerabbit"]},
     {"n": "Bewakoof", "c": "shopping", "a": ["bewakoof"]},
@@ -105,8 +105,8 @@
     {"n": "Adidas", "c": "shopping", "a": ["adidas"]},
     {"n": "Bata", "c": "shopping", "a": ["bata"]},
     {"n": "Titan", "c": "shopping", "a": ["titan company", "titan", "fastrack"]},
-    {"n": "Tanishq", "c": "shopping", "a": ["tanishq"]},
-    {"n": "Bhima Jewellers", "c": "shopping", "a": ["bhima jewellers", "bhima"]},
+    {"n": "Tanishq", "c": "shopping", "a": ["tanishq jewellery", "tanishq jewellers"]},
+    {"n": "Bhima Jewellers", "c": "shopping", "a": ["bhima jewellers", "bhima jewellery"]},
     {"n": "Apple Store", "c": "shopping", "a": ["apple store", "apple india private", "imagine store"]},
     {"n": "Samsung", "c": "shopping", "a": ["samsung"]},
     {"n": "OnePlus", "c": "shopping", "a": ["oneplus"]},
@@ -132,7 +132,7 @@
     {"n": "HP Petrol", "c": "fuel", "a": ["hpcl", "hindustan petroleum"]},
     {"n": "Bharat Petroleum", "c": "fuel", "a": ["bpcl", "bharat petroleum"]},
     {"n": "Shell", "c": "fuel", "a": ["shell india", "shell"]},
-    {"n": "Nayara", "c": "fuel", "a": ["nayara", "essar oil"]},
+    {"n": "Nayara", "c": "fuel", "a": ["nayara energy", "essar oil"]},
     {"n": "Jio-bp", "c": "fuel", "a": ["jio bp", "reliance bp"]},
 
     {"n": "BESCOM", "c": "bills", "a": ["bescom", "bangalore electricity"]},
@@ -229,18 +229,18 @@
     {"n": "Thrillophilia", "c": "travel", "a": ["thrillophilia"]},
     {"n": "Alipay", "c": "travel", "a": ["alipay"]},
 
-    {"n": "Online courses", "c": "education", "a": ["byju", "byjus", "unacademy", "vedantu", "upgrad", "coursera", "udemy", "simplilearn", "great learning", "physics wallah", "physicswallah", "skillshare", "masterclass", "duolingo"]},
+    {"n": "Online courses", "c": "education", "a": ["byjus", "byju s", "think and learn", "unacademy", "vedantu", "upgrad", "coursera", "udemy", "simplilearn", "great learning", "physics wallah", "physicswallah", "skillshare", "masterclass", "duolingo"]},
 
     {"n": "Cult", "c": "personal", "a": ["cult fit", "cultfit", "curefit", "cure fit", "cult sport"]},
     {"n": "Gyms", "c": "personal", "a": ["gold s gym", "anytime fitness", "snap fitness"]},
     {"n": "Salons", "c": "personal", "a": ["naturals salon", "green trends", "lakme salon", "bodycraft", "jawed habib", "toni guy", "enrich salon", "limelite"]},
 
-    {"n": "Temples & charity", "c": "donations", "a": ["tirumala tirupati", "ttd", "tirumala", "iskcon", "give india", "giveindia", "ketto", "milaap", "pm cares", "akshaya patra"]},
+    {"n": "Temples & charity", "c": "donations", "a": ["tirumala tirupati", "ttd", "iskcon", "give india", "giveindia", "ketto", "milaap", "pm cares", "akshaya patra"]},
 
     {"n": "Credit Saison", "c": "emi", "a": ["credit saison", "creditsaison", "creditsais"]},
     {"n": "Airtel Finance", "c": "emi", "a": ["airtel finance"]},
     {"n": "Bajaj Finance", "c": "emi", "a": ["bajaj finance", "bajaj finserv", "bajajfinance"]},
-    {"n": "Loans", "c": "emi", "a": ["home credit", "tata capital", "hdb financial", "kreditbee", "moneyview", "money view", "navi finserv", "lazypay", "zestmoney", "simpl", "fibe", "early salary", "mpokket", "idfc first loan"]},
+    {"n": "Loans", "c": "emi", "a": ["home credit", "tata capital", "hdb financial", "kreditbee", "moneyview", "money view", "navi finserv", "lazypay", "zestmoney", "simpl", "fibe", "early salary", "mpokket", "idfc first loan", "credit access grameen"]},
 
     {"n": "Insurance", "c": "insurance", "a": ["lic of india", "life insurance corporation", "hdfc life", "icici prudential", "icici lombard", "sbi life", "max life", "axis max life", "tata aia", "bajaj allianz", "star health", "niva bupa", "care health", "digit insurance", "go digit", "acko", "policybazaar", "tata aig", "hdfc ergo", "new india assurance", "aditya birla health", "royal sundaram"]},
 

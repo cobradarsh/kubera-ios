@@ -38,6 +38,7 @@ enum Pref {
     static let claudeEnabled = "claudeEnabled"
     static let claudeModel = "claudeModel"
     static let lastClaudeRun = "lastClaudeRun"
+    static let claudeAsked = "claudeAsked"          // payee keys Claude was already asked about (newest last)
     static let lookupCity = "lookupCity"
     static let budgetAlerts = "budgetAlerts"
     static let autoScanScreenshots = "autoScanScreenshots"

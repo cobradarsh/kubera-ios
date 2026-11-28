@@ -3,6 +3,8 @@ import SwiftUI
 struct TransactionsView: View {
     @EnvironmentObject var store: Store
     var filterCategory: String? = nil
+    /// Only this month (a By category row on Expenses), or every month when nil.
+    var month: Date? = nil
     @State private var query = ""
     @State private var showCredits = true
     @State private var showDuplicates = false
@@ -10,6 +12,7 @@ struct TransactionsView: View {
     var body: some View {
         let items = filtered
         let groups = Dictionary(grouping: items) { Cal.startOfDay($0.date) }.sorted { $0.key > $1.key }
+        let stats = store.spend
         List {
             if items.isEmpty {
                 EmptyNote(symbol: "magnifyingglass", title: "Nothing here", detail: "Try another search.")
@@ -27,7 +30,8 @@ struct TransactionsView: View {
                     HStack {
                         Text(Cal.dayTitleFormatter.string(from: day))
                         Spacer()
-                        let spent = store.spend.spent(list)
+                        // Like the month totals: repeats and payments left out of totals do not count.
+                        let spent = stats.spent(list.filter { !$0.excluded && !$0.isDuplicate })
                         if spent > 0 { Text(Money.format(spent, paise: false)).monospacedDigit() }
                     }
                     .font(.caption.weight(.semibold))
@@ -38,7 +42,7 @@ struct TransactionsView: View {
         .listStyle(.insetGrouped)
         .kuberaScreen()
         .searchable(text: $query, prompt: "Payee, amount, UPI ID, note")
-        .navigationTitle(filterCategory.map { store.category($0).name } ?? "Transactions")
+        .navigationTitle(title)
         .toolbar {
             Menu {
                 Toggle("Money received", isOn: $showCredits)
@@ -47,12 +51,18 @@ struct TransactionsView: View {
         }
     }
 
+    private var title: String {
+        let name = filterCategory.map { store.category($0).name } ?? "Transactions"
+        return month.map { name + " · " + Cal.shortMonthFormatter.string(from: $0) } ?? name
+    }
+
     private var filtered: [Txn] {
         let q = query.trimmed.lowercased()
         return store.state.txns.filter { t in
             if !showDuplicates && t.isDuplicate { return false }
             if !showCredits && t.direction == .credit { return false }
             if let c = filterCategory, t.category != c { return false }
+            if let m = month, !Cal.sameMonth(t.date, m) { return false }
             if q.isEmpty { return true }
             return t.counterparty.lowercased().contains(q) || (t.vpa?.lowercased().contains(q) ?? false)
                 || String(format: "%.0f", t.amount).contains(q) || (t.note?.lowercased().contains(q) ?? false)
@@ -67,7 +77,7 @@ struct TxnDetailView: View {
     @Environment(\.dismiss) private var dismiss
     let txn: Txn
     @State private var current: Txn
-    @State private var remember = true
+    @State private var remember: Bool
     @State private var name = ""
     @State private var note = ""
     @State private var showRaw = false
@@ -77,6 +87,8 @@ struct TxnDetailView: View {
         _current = State(initialValue: txn)
         _name = State(initialValue: txn.counterparty)
         _note = State(initialValue: txn.note ?? "")
+        // A rule also re-sorts earlier payments, so it starts on only for a payment that is not sorted yet.
+        _remember = State(initialValue: txn.category == Category.uncategorized)
     }
 
     var body: some View {
@@ -105,7 +117,7 @@ struct TxnDetailView: View {
                     Toggle(isOn: $remember) {
                         VStack(alignment: .leading, spacing: 2) {
                             Text("Remember for this payee").font(.subheadline)
-                            Text(current.counterpartyKey.isEmpty ? "No stable name to remember" : "Future payments to the same \(current.vpa != nil ? "UPI ID" : "name") get the same category")
+                            Text(current.counterpartyKey.isEmpty ? "No stable name to remember" : "Earlier and future payments to the same \(current.vpa != nil ? "UPI ID" : "name") get this category too, except ones you sorted yourself")
                                 .font(.caption2).foregroundColor(Theme.dim)
                         }
                     }
@@ -262,10 +274,21 @@ struct CheckInView: View {
     @State private var remember = true
     @State private var labels: [String: String] = [:]
     @AppStorage(Pref.claudeEnabled) private var claudeOn = false
+    @AppStorage(Pref.webLookup) private var webOn = true
+    @State private var hasClaudeKey = false
 
     var body: some View {
         NavigationStack {
             let pending = store.uncategorized
+            // The lookup button shows only when runLookups would do something (same rules as the Store): a web lookup
+            // still to run or to try again, or Claude on with a key and a business name to ask about. Never people.
+            let people = Set(store.state.txns.filter { $0.isPerson || $0.suggestion == Category.people }.map { $0.counterpartyKey })
+            let askable = pending.filter { !people.contains($0.counterpartyKey) }
+            let webCan = webOn && askable.contains(where: { $0.lookupState == .pending || $0.lookupState == .failed })
+            let claudeCan = claudeOn && hasClaudeKey && askable.contains(where: {
+                !$0.counterpartyKey.isEmpty && Categorizer.isLookupable(name: $0.counterparty, vpa: $0.vpa)
+            })
+            let lookupTitle = claudeCan ? (webCan ? "Look these up (web + Claude)" : "Ask Claude about these") : "Look these up on the web"
             ScrollView {
                 VStack(spacing: 14) {
                     MantraHeader()
@@ -282,11 +305,11 @@ struct CheckInView: View {
                             if store.lookingUp { ProgressView().tint(Theme.gold) }
                             Text(store.lookupStatus ?? "Looking up…").font(.caption).foregroundColor(Theme.dim)
                         }
-                    } else if !pending.isEmpty {
+                    } else if webCan || claudeCan {
                         Button {
-                            Task { await store.runLookups(useClaude: true) }
+                            Task { await store.runLookups(useClaude: true, retryFailed: true) }
                         } label: {
-                            Label(claudeOn ? "Look these up (web + Claude)" : "Look these up on the web", systemImage: "globe.asia.australia.fill")
+                            Label(lookupTitle, systemImage: "globe.asia.australia.fill")
                                 .font(.footnote.weight(.semibold))
                         }
                         .buttonStyle(.bordered)
@@ -305,6 +328,7 @@ struct CheckInView: View {
             .navigationTitle("Check-in")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Done") { dismiss() } } }
+            .onAppear { hasClaudeKey = !(Keychain.get(Keychain.claudeKey) ?? "").isEmpty }
         }
     }
 }
@@ -381,7 +405,7 @@ struct BudgetsView: View {
             .kuberaScreen()
             .navigationTitle("Budgets")
             .navigationBarTitleDisplayMode(.inline)
-            .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Done") { save(); dismiss() } } }
+            .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Done") { dismiss() } } }
             .onAppear {
                 for (k, v) in store.state.budgets { values[k] = String(Int(v)) }
             }
@@ -395,7 +419,12 @@ struct BudgetsView: View {
                 Image(systemName: symbol).foregroundColor(color).frame(width: 22)
                 Text(name)
                 Spacer()
-                TextField("No budget", text: Binding(get: { values[id] ?? "" }, set: { values[id] = $0.filter { $0.isNumber } }))
+                // Saved as it is typed, so closing the sheet by swiping it down keeps it.
+                TextField("No budget", text: Binding(get: { values[id] ?? "" }, set: { v in
+                    let digits = v.filter { $0.isNumber }
+                    values[id] = digits
+                    store.setBudget(id, Double(digits))
+                }))
                     .keyboardType(.numberPad)
                     .multilineTextAlignment(.trailing)
                     .frame(width: 110)
@@ -405,9 +434,5 @@ struct BudgetsView: View {
                 Text("\(Money.format(spent, paise: false)) spent this month").font(.caption2).foregroundColor(Theme.dim)
             }
         }
-    }
-
-    private func save() {
-        for (k, v) in values { store.setBudget(k, Double(v)) }
     }
 }

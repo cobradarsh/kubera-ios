@@ -5,7 +5,7 @@ cd "$(dirname "$0")/.."
 mkdir -p build-tests
 
 echo "== core"
-xcrun swiftc -O -parse-as-library -module-name KuberaCore App/Core/*.swift tests/CoreTests.swift -o build-tests/coretests
+xcrun swiftc -O -parse-as-library -module-name KuberaCore App/Core/*.swift tests/CoreTests*.swift -o build-tests/coretests
 build-tests/coretests App/Resources/merchants.json
 
 if [ -f tests/MailTests.swift ]; then

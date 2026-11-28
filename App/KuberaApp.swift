@@ -24,6 +24,8 @@ struct KuberaApp: App {
                     case .active:
                         lock.didForeground()
                         Task { await store.sync(reason: "foreground") }
+                    case .inactive:
+                        lock.didResignActive()
                     case .background:
                         lock.didBackground()
                         store.saveNow()
@@ -112,6 +114,8 @@ final class Router: ObservableObject {
     func open(_ url: URL) {
         guard url.scheme == "kubera" else { return }
         if url.host == "_diag" { Diag.handle(url); return }
+        // While locked (or about to lock) the link waits, and opens after Face ID.
+        if AppLock.shared.hold(url) { return }
         switch url.host ?? "" {
         case "checkin": tab = .expenses; showCheckin = true
         case "budgets": tab = .expenses; showBudgets = true

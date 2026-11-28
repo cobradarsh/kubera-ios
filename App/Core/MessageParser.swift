@@ -187,8 +187,11 @@ enum MessageParser {
             // Only a bank's own SMS is the record of a payment; everything else confirms one.
             if m.source != .sms || !isBankSender { t.isPrimary = false }
             var out: [ParsedItem] = [.txn(t)]
-            if let b = t.balanceAfter, t.instrument != .creditCard, t.instrument != .creditCardUPI, let bk = t.bank {
-                out.append(.balance(institution: bk, last4: t.last4, kind: .savings, amount: b, asOf: t.when ?? m.date))
+            // A balance belongs to an account only when the text names the account: card and ATM alerts do not
+            // say which one (the daily "Available Bal" message keeps that account's balance).
+            if let b = t.balanceAfter, t.instrument != .creditCard, t.instrument != .creditCardUPI, let bk = t.bank,
+               let g = acctLast4Rx.match(text), let acct = g[1] {
+                out.append(.balance(institution: bk, last4: acct, kind: .savings, amount: b, asOf: t.when ?? m.date))
             }
             return out
         }
@@ -251,12 +254,27 @@ enum MessageParser {
         return Cal.cal.date(bySettingHour: t[0], minute: t[1], second: t.count > 2 ? t[2] : 0, of: d)
     }
 
-    /// The text's own date matters only when it is a different day from the message (late SMS, e-mails).
+    /// The text's own date matters only when it is a different day from the message (late SMS, e-mails). The time is
+    /// the moment of that day nearest the message, so an SMS that comes after midnight stays near the payment's
+    /// own notification.
     static func when(stated: Date?, message: Date) -> Date? {
         guard let s = stated else { return nil }
         if Cal.sameDay(s, message) { return nil }
         if s > message.addingTimeInterval(36 * 3600) { return nil } // never in the future of the message
-        return Cal.cal.date(bySettingHour: 12, minute: 0, second: 0, of: s)
+        let start = Cal.startOfDay(s)
+        let end = Cal.cal.date(bySettingHour: 23, minute: 59, second: 59, of: s) ?? start
+        return min(max(message, start), end)
+    }
+
+    /// "31-10" (day and month, no year): the latest such date that is not after the message (with the same 36 h of
+    /// slack as `when`), so "31-12" in a message of 1 January is last year's.
+    static func parseDayMonth(_ raw: String?, message: Date) -> Date? {
+        guard let s = raw?.trimmed, !s.isEmpty else { return nil }
+        let y = Cal.year(message)
+        for year in [y + 1, y, y - 1] {
+            if let d = parseDate("\(s)-\(year)"), d <= message.addingTimeInterval(36 * 3600) { return d }
+        }
+        return nil
     }
 
     static func cleanName(_ s: String?) -> String? {
@@ -333,11 +351,12 @@ enum MessageParser {
                                    when: parseDateTime(g[5], g[6]), isPrimary: true, pattern: "cc-spent"))]
         })
         // HDFC RuPay credit card on UPI. The payee's VPA is masked since Oct 2026 ("*iggy@icici") or "NA".
-        p.append(Pattern(name: "cc-upi", rx: Rx(#"^Txn Rs\.?\s?"# + A + #" On (.+?) Card (\d{4}) At (\S+) by UPI (\d+) On (\d{1,2}-\d{1,2})"#)) { g, _, _, _ in
+        p.append(Pattern(name: "cc-upi", rx: Rx(#"^Txn Rs\.?\s?"# + A + #" On (.+?) Card (\d{4}) At (\S+) by UPI (\d+) On (\d{1,2}-\d{1,2})"#)) { g, m, _, _ in
             guard let amt = amount(g[1]) else { return nil }
             let v = g[4].flatMap { $0.uppercased() == "NA" ? nil : $0 }
             return [.txn(ParsedTxn(amount: amt, direction: .debit, instrument: .creditCardUPI, bank: cleanName(g[2]), last4: g[3],
-                                   counterparty: v, vpa: v, ref: g[5], balanceAfter: nil, when: nil, isPrimary: true, pattern: "cc-upi"))]
+                                   counterparty: v, vpa: v, ref: g[5], balanceAfter: nil,
+                                   when: when(stated: parseDayMonth(g[6], message: m.date), message: m.date), isPrimary: true, pattern: "cc-upi"))]
         })
         // Credits.
         p.append(Pattern(name: "credit-vpa", rx: Rx(#"^Credit Alert!\s*Rs\.?\s?"# + A + #" credited to (.+?) A/c X*(\d{3,6}) on (\S+) from VPA (\S+) \(UPI (\d+)\)"#)) { g, m, _, _ in
@@ -431,11 +450,12 @@ enum MessageParser {
                                    counterparty: "Refund", vpa: nil, ref: refDigits, balanceAfter: nil,
                                    when: when(stated: parseDate(g[3]), message: m.date), isPrimary: true, hint: .refund, pattern: "cc-refund"))]
         })
+        // The savings account's own credit alert is the record of this money; this one repeats it (and says it is a transfer).
         p.append(Pattern(name: "excess-refund", rx: Rx(#"Excess Balance Refunded:\s*Rs\.?\s?"# + A + #" has been credited from your (.+?) Credit Card ending (\d{4}) to your Bank A/c ending (\d{3,6})(?: on (\S+?))?\.?$"#)) { g, m, _, _ in
             guard let amt = amount(g[1]) else { return nil }
             return [.txn(ParsedTxn(amount: amt, direction: .credit, instrument: .account, bank: cleanName(g[2]), last4: g[4],
                                    counterparty: "Credit card excess refund", vpa: nil, ref: nil, balanceAfter: nil,
-                                   when: when(stated: parseDate(g[5]), message: m.date), isPrimary: true, hint: .selfTransfer, pattern: "excess-refund"))]
+                                   when: when(stated: parseDate(g[5]), message: m.date), isPrimary: false, hint: .selfTransfer, pattern: "excess-refund"))]
         })
         // Small banks: "A/c XX999 credited Rs 3.00 on 30-06-26-Credit Int from … Bal: Rs 1000.00".
         p.append(Pattern(name: "ac-short", rx: Rx(#"^A/c X*(\d{3,6}) (credited|debited) (?:with |by )?Rs\.?\s?"# + A + #" on (\d{1,2}-\d{1,2}-\d{2,4})-?\s*(.*?)\.\s*Bal:?\s*Rs\.?\s?"# + A)) { g, m, text, bank in
@@ -536,7 +556,10 @@ enum MessageParser {
         ("declined", Rx(#"\b(declined|unsuccessful|could not be (?:processed|completed)|insufficient (?:funds|balance))\b"#)),
         ("failed", Rx(#"\bhas failed\b|\bfailed\b.*\b(payment|transaction|txn)\b|\b(payment|transaction|txn)\b.*\bfailed\b|unable to (?:pay|process)"#)),
         ("payment request", Rx(#"has requested (?:a )?(?:payment|money)|requested money|collect request|payment request|request(?:ed)? (?:of|for) Rs"#)),
-        ("future debit", Rx(#"will be (?:debited|deducted|charged|auto-?debited|presented)|is scheduled|upcoming (?:debit|payment)"#)),
+        // Money that will move later: the bank's own message when it does is the record. A message that also tells
+        // a debit ("… debited. Beneficiary will be credited shortly") is a real debit, and one that tells a credit
+        // ("credited … refund initiated by …") a real credit.
+        ("not done yet", Rx(#"will be (?:debited|deducted|charged|auto-?debited|presented)|^(?!.*\b(?:debited|deducted|spent|sent|paid|withdrawn|transferred|beneficiary|payee)\b).*\bwill (?:be (?:credited|refunded|reversed)|reflect)|^(?!.*\b(?<!will be )(?:credited|received|deposited)\b).*(?:\b(?:refund|reversal)\b.{0,80}?\binitiated\b|\binitiated (?:a |the |your )?(?:refund|reversal)\b)|is scheduled|upcoming (?:debit|payment)"#)),
         ("reminder", Rx(#"\bis due\b|\bdue (?:on|date|by)\b|minimum (?:amount )?due|total (?:amount )?due|bill (?:of|for) Rs\.?\s?[0-9,.]+ (?:is|has been) generated|\bstatement\b|kindly ignore if paid|pay now|avoid (?:late|penal)"#)),
         ("cancelled", Rx(#"\b(cancelled|canceled|revoked)\b"#)),
         ("offer", Rx(#"\b(voucher|offer|cashback & more|apply now|avail now|pre-?approved|you(?:'re| are) (?:eligible|selected)|loan of|loan on card|smart ?emi|easy ?emi|convert .{0,30}(?:to|into) (?:simple |easy )?(?:monthly )?emi|can be paid in parts|get up to|discount|congrats|lowest (?:rate|roi)|interest rate starts|instant loan|check (?:your )?(?:loan )?offer|t&c|tnc)\b"#)),
@@ -569,7 +592,8 @@ enum MessageParser {
                                                             "in.upstox.pro": "Upstox", "com.nextbillion.groww": "Groww", "com.msf.angelmobile": "Angel One"]
     private static let contextRx = Rx(#"\b(a/c|acct|account|card|upi|vpa|bank|imps|neft|rtgs|wallet|atm|txn|transaction|ref)\b"#)
     private static let cardLast4Rx = Rx(#"(?:credit card|debit card|card|cc|dc)\s*(?:no\.?|number)?\s*(?:ending(?: with)?|xx|x|\*+)?\s*[x*]*\s*(\d{4})\b"#)
-    private static let acctLast4Rx = Rx(#"(?:a/c|acct|account|ac)\.?\s*(?:no\.?|number)?\s*[:.]?\s*[x*]*\s*(\d{3,6})\b"#)
+    // Whole words only: "AC0123" inside an ATM id is not an account.
+    private static let acctLast4Rx = Rx(#"\b(?:a/c|acct|account|ac)\.?\s*(?:no\.?|number)?\s*[:.]?\s*[x*]*\s*(\d{3,6})\b"#)
     private static let vpaRx = Rx(#"(?:vpa|upi id)\s*:?\s*([A-Za-z0-9.\-_*]+@[A-Za-z0-9.\-]+)"#)
     /// A UPI ID anywhere ("to swiggy@icici on"), but not an e-mail address ("care@bank.com").
     private static let anyVPARx = Rx(#"(?<![A-Za-z0-9.\-_])([A-Za-z0-9.\-_*]{2,}@[A-Za-z][A-Za-z0-9]{1,15})(?![A-Za-z0-9]|\.[A-Za-z])"#)

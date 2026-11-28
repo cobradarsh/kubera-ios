@@ -35,10 +35,12 @@ private struct NoData: View {
 struct DailyBars: View {
     @EnvironmentObject var store: Store
     var month: Date
-    @State private var picked: DayTotal?
+    /// The tapped day; its amount is read from the current totals, so an edit made since shows at once.
+    @State private var pickedDay: Date?
 
     var body: some View {
         let days = store.spend.byDay(month: month)
+        let picked = days.first { $0.day == pickedDay }
         let total = days.reduce(0) { $0 + $1.amount }
         let avg = days.isEmpty ? 0 : total / Double(days.count)
         VStack(alignment: .leading, spacing: 6) {
@@ -65,18 +67,21 @@ struct DailyBars: View {
                 .chartYAxis { AxisMarks { v in AxisGridLine().foregroundStyle(Theme.stroke); AxisValueLabel { Text(Money.compact(v.as(Double.self) ?? 0)) } } }
                 .chartOverlay { proxy in
                     GeometryReader { geo in
+                        // A tap (not a drag) picks a day, so a swipe that starts on the chart still scrolls the screen.
+                        // Tapping the picked day again clears it.
                         Rectangle().fill(.clear).contentShape(Rectangle())
-                            .gesture(DragGesture(minimumDistance: 0).onChanged { g in
-                                let x = g.location.x - geo[proxy.plotAreaFrame].origin.x
-                                if let date: Date = proxy.value(atX: x) {
-                                    picked = days.min { abs($0.day.timeIntervalSince(date)) < abs($1.day.timeIntervalSince(date)) }
-                                }
-                            }.onEnded { _ in picked = nil })
+                            .gesture(SpatialTapGesture().onEnded { tap in
+                                let x = tap.location.x - geo[proxy.plotAreaFrame].origin.x
+                                guard let date: Date = proxy.value(atX: x) else { return }
+                                let day = days.min { abs($0.day.timeIntervalSince(date)) < abs($1.day.timeIntervalSince(date)) }?.day
+                                pickedDay = day == pickedDay ? nil : day
+                            })
                     }
                 }
                 .frame(height: 220)
             }
         }
+        .onChange(of: month) { _ in pickedDay = nil }
     }
 }
 

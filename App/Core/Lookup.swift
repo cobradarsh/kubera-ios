@@ -87,10 +87,11 @@ struct FreeLookup {
     }
 
     /// "PAWAN ELECTRICALS AND LIG" -> "Pawan Electricals And"; strips legal suffixes and stray characters.
+    /// Words with a digit go too: they can be a phone, account or reference number.
     static func searchText(_ name: String) -> String {
         var words = MerchantDB.normalize(name).split(separator: " ").map(String.init)
         let drop: Set<String> = ["pvt", "private", "ltd", "limited", "llp", "inc", "co", "rsp", "pos", "upi", "ecom", "www", "com", "in"]
-        words.removeAll { drop.contains($0) }
+        words.removeAll { w in drop.contains(w) || w.contains(where: { $0.isNumber }) }
         if words.count > 1, let last = words.last, last.count <= 3 { words.removeLast() } // truncated word
         return words.joined(separator: " ").capitalized
     }
@@ -184,10 +185,24 @@ struct ClaudeLookup {
         }
     }
 
-    func categorize(_ items: [Item]) async throws -> [Result] {
-        guard !items.isEmpty else { return [] }
-        let ids = categories.filter { $0.id != Category.uncategorized && $0.kind != .income }.map { $0.id }
-        let catList = categories.filter { ids.contains($0.id) }.map { "\($0.id) = \($0.name)" }.joined(separator: "\n")
+    /// The payee list as it is sent: short ids ("p0", "p1", ...) and names only. A payee key can hold a UPI ID or a
+    /// phone number, so keys never leave the phone; `keys` maps each id back to its payee key.
+    static func payeeMessage(_ items: [Item]) throws -> (text: String, keys: [String: String]) {
+        var keys: [String: String] = [:]
+        var sent: [Item] = []
+        for (i, item) in items.enumerated() {
+            keys["p\(i)"] = item.key
+            sent.append(Item(key: "p\(i)", name: item.name))
+        }
+        let json = try String(data: JSONEncoder().encode(sent), encoding: .utf8) ?? "[]"
+        return ("Categorise these payees (JSON):\n" + json, keys)
+    }
+
+    /// One request. Answers may only use the sent `ids`; `container` (from a paused answer) continues the turn
+    /// in the code-execution container web search ran in.
+    func requestBody(messages: [[String: Any]], ids: [String], container: String?) -> [String: Any] {
+        let catIDs = categories.filter { $0.id != Category.uncategorized && $0.kind != .income }.map { $0.id }
+        let catList = categories.filter { catIDs.contains($0.id) }.map { "\($0.id) = \($0.name)" }.joined(separator: "\n")
         let system = """
         You categorise payees from an Indian user's bank alerts (SMS) into spending categories. Payee names are often \
         truncated at 25 characters, upper-cased, or a payment-gateway / legal-entity name (e.g. "BUNDL TECHNOLOGIES" is \
@@ -198,10 +213,9 @@ struct ClaudeLookup {
         reason, and the business's usual display name (or the cleaned-up name if unknown). If a payee is clearly a \
         private person, use "people".
         """
-        let payload = try String(data: JSONEncoder().encode(items), encoding: .utf8) ?? "[]"
         let itemProperties: [String: Any] = [
-            "key": ["type": "string"] as [String: Any],
-            "category": ["type": "string", "enum": ids] as [String: Any],
+            "key": ["type": "string", "enum": ids] as [String: Any],
+            "category": ["type": "string", "enum": catIDs] as [String: Any],
             "confidence": ["type": "string", "enum": ["high", "low"]] as [String: Any],
             "reason": ["type": "string"] as [String: Any],
             "display_name": ["type": "string"] as [String: Any],
@@ -222,24 +236,34 @@ struct ClaudeLookup {
         let tool: [String: Any] = ["type": "web_search_20260209", "name": "web_search", "max_uses": 6]
         let format: [String: Any] = ["type": "json_schema", "schema": schema]
         let outputConfig: [String: Any] = ["effort": "low", "format": format]
-        var messages: [[String: Any]] = [["role": "user", "content": "Categorise these payees (JSON):\n" + payload]]
+        var body: [String: Any] = [
+            "model": model,
+            "max_tokens": 16000,
+            "system": system,
+            "tools": [tool],
+            "output_config": outputConfig,
+            "fallbacks": "default",
+            "messages": messages,
+        ]
+        if let c = container { body["container"] = c }
+        return body
+    }
+
+    func categorize(_ items: [Item]) async throws -> [Result] {
+        guard !items.isEmpty else { return [] }
+        let (prompt, keys) = try Self.payeeMessage(items)
+        let ids = items.indices.map { "p\($0)" }
+        var messages: [[String: Any]] = [["role": "user", "content": prompt]]
+        var container: String?
         for _ in 0..<3 {
-            let body: [String: Any] = [
-                "model": model,
-                "max_tokens": 16000,
-                "system": system,
-                "tools": [tool],
-                "output_config": outputConfig,
-                "fallbacks": "default",
-                "messages": messages,
-            ]
-            var req = URLRequest(url: URL(string: "https://api.anthropic.com/v1/messages")!, timeoutInterval: 180)
+            // Not streamed, so nothing arrives until the whole answer is ready: allow for slow searches.
+            var req = URLRequest(url: URL(string: "https://api.anthropic.com/v1/messages")!, timeoutInterval: 600)
             req.httpMethod = "POST"
             req.setValue("application/json", forHTTPHeaderField: "Content-Type")
             req.setValue(apiKey, forHTTPHeaderField: "x-api-key")
             req.setValue("2026-10-21", forHTTPHeaderField: "anthropic-version")
             req.setValue("server-side-fallback-2026-07-01", forHTTPHeaderField: "anthropic-beta")
-            req.httpBody = try JSONSerialization.data(withJSONObject: body)
+            req.httpBody = try JSONSerialization.data(withJSONObject: requestBody(messages: messages, ids: ids, container: container))
             let (data, resp) = try await session.data(for: req)
             let code = (resp as? HTTPURLResponse)?.statusCode ?? 0
             guard let j = try JSONSerialization.jsonObject(with: data) as? [String: Any] else { throw Failure.badResponse("not JSON") }
@@ -251,15 +275,28 @@ struct ClaudeLookup {
             let content = j["content"] as? [[String: Any]] ?? []
             if stop == "refusal" { throw Failure.refused }
             if stop == "pause_turn" {
-                // The server's tool loop paused: send its turn back as it is and let it continue.
+                // The server's tool loop paused: send its turn back as it is, in the same container, and let it continue.
                 messages.append(["role": "assistant", "content": content])
+                if let id = (j["container"] as? [String: Any])?["id"] as? String { container = id }
                 continue
             }
-            guard let text = content.last(where: { ($0["type"] as? String) == "text" })?["text"] as? String,
-                  let d = text.data(using: .utf8) else { throw Failure.badResponse("no text") }
-            struct Wrapper: Codable { var results: [Result] }
-            return try JSONDecoder().decode(Wrapper.self, from: d).results
+            guard let text = content.last(where: { ($0["type"] as? String) == "text" })?["text"] as? String else {
+                throw Failure.badResponse("no text")
+            }
+            return try Self.results(from: text, keys: keys)
         }
         throw Failure.badResponse("paused too many times")
+    }
+
+    /// The answer names the short ids: put the payee keys back and drop any id that was not sent.
+    static func results(from text: String, keys: [String: String]) throws -> [Result] {
+        struct Wrapper: Codable { var results: [Result] }
+        let answers = try JSONDecoder().decode(Wrapper.self, from: Data(text.utf8)).results
+        return answers.compactMap { (answer: Result) -> Result? in
+            guard let key = keys[answer.key] else { return nil }
+            var r = answer
+            r.key = key
+            return r
+        }
     }
 }

@@ -7,3 +7,5 @@ shots/
 .theos/
 packages/
 .phone-container
+build_dl/
+tools/steps_import.txt

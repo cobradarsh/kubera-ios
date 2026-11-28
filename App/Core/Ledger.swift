@@ -249,10 +249,11 @@ struct Ledger {
         t.category = r.category
         t.categorySource = r.source
         if let n = r.displayName, !n.isEmpty { t.counterparty = n }
-        t.isPerson = r.isPerson
+        // Once a person (here, or by a web lookup or Claude), always a person: people are never looked up.
+        t.isPerson = t.isPerson || r.isPerson
         if r.suggestion != nil { t.suggestion = r.suggestion }
         if r.category != Category.uncategorized { t.suggestion = nil; t.suggestionNote = nil }
-        if r.wantsLookup && t.lookupState == .none { t.lookupState = .pending }
+        if r.wantsLookup && !t.isPerson && t.lookupState == .none { t.lookupState = .pending }
     }
 
     // MARK: Duplicates
@@ -263,7 +264,7 @@ struct Ledger {
         // Same reference number.
         if let r = t.ref, r.count >= 6,
            let j = state.txns.lastIndex(where: { $0.ref == r && $0.direction == t.direction && abs($0.amount - t.amount) < 0.01 && $0.duplicateOf == nil }) {
-            merge(newer: &t, existingAt: j)
+            merge(newer: &t, existingAt: j, sameRef: true)
             return true
         }
         var best: (index: Int, gap: TimeInterval)?
@@ -275,39 +276,93 @@ struct Ledger {
             let window: TimeInterval = bankSide ? 36 * 3600 : 2 * 3600
             if gap > window { continue }
             if let a = c.last4, let b = t.last4, a != b { continue }
+            // Different reference numbers: different payments.
+            if let a = c.ref, let b = t.ref, a != b { continue }
+            // An app, mail sender or SMS sender tells each payment once: two of its messages are two payments
+            // (unless it is the same message seen again).
+            if !c.isPrimary && !t.isPrimary && sameSender(c, t) && !sameMessage(c, t) { continue }
+            // Already confirmed by a message like this one: this one is about another payment.
+            if state.txns.contains(where: { $0.duplicateOf == c.id && $0.pattern == t.pattern && sameSender($0, t) && !sameMessage($0, t) }) {
+                continue
+            }
             if best == nil || gap < best!.gap { best = (j, gap) }
         }
         if let b = best {
-            merge(newer: &t, existingAt: b.index)
+            merge(newer: &t, existingAt: b.index, sameRef: false)
             return true
         }
         return false
     }
 
+    /// SMS by sender code (the "AD-" / "VM-" prefix and the filter tag vary), others by app or mail address. A mail
+    /// app shows mail from many senders: there the mail's sender (the title, first in the text) must match too.
+    private func sameSender(_ a: Txn, _ b: Txn) -> Bool {
+        guard a.source == b.source else { return false }
+        let x = a.sender ?? "", y = b.sender ?? ""
+        if a.source == .sms, let cx = MessageParser.senderInfo(x).code, let cy = MessageParser.senderInfo(y).code {
+            return cx == cy
+        }
+        guard x.lowercased() == y.lowercased() else { return false }
+        if a.source == .notification && Ledger.mailApps.contains(x.lowercased()) {
+            return a.raw.components(separatedBy: " · ").first == b.raw.components(separatedBy: " · ").first
+        }
+        return true
+    }
+
+    private static let mailApps: Set<String> = ["com.google.gmail", "com.apple.mobilemail"]
+
+    /// One message seen again: a notification whose text the app changed (ids are "ntf:<app>:<request id>:<text
+    /// hash>"), or the same text at the same moment under a new id (mail read again after Gmail renumbered it).
+    private func sameMessage(_ a: Txn, _ b: Txn) -> Bool {
+        if !a.raw.isEmpty && a.raw == b.raw && abs(a.date.timeIntervalSince(b.date)) < 1 { return true }
+        func request(_ id: String) -> String? {
+            guard id.hasPrefix("ntf:"), let r = id.range(of: ":", options: .backwards) else { return nil }
+            return String(id[..<r.lowerBound])
+        }
+        guard let x = request(a.id), let y = request(b.id) else { return false }
+        return x == y
+    }
+
     /// Keeps the primary record visible and the other one as its duplicate, carrying over what is useful.
-    private mutating func merge(newer t: inout Txn, existingAt j: Int) {
+    private mutating func merge(newer t: inout Txn, existingAt j: Int, sameRef: Bool) {
         var c = state.txns[j]
         let newIsPrimary = t.isPrimary && !c.isPrimary
         if newIsPrimary {
             c.duplicateOf = t.id
             if c.categorySource == .user { t.category = c.category; t.categorySource = .user }
-            enrich(&t, from: c)
+            enrich(&t, from: c, sameRef: sameRef)
             state.txns[j] = c
         } else {
             t.duplicateOf = c.id
-            enrich(&c, from: t)
+            let hint = c.hint
+            enrich(&c, from: t, sameRef: sameRef)
+            // The confirmation said what kind of money it was (a card's excess balance back, a broker payout).
+            if c.hint != hint { apply(makeCategorizer().categorize(c, hint: c.hint), to: &c) }
             state.txns[j] = c
         }
     }
 
-    /// A notification or e-mail often names the payee where the bank SMS shows only a UPI ID.
-    private func enrich(_ primary: inout Txn, from other: Txn) {
+    /// A notification or e-mail often names the payee where the bank SMS shows only a UPI ID, or says what kind of
+    /// money it was. A record linked by amount and time alone may be another payment: its UPI ID and reference
+    /// number go only onto another confirmation, and its kind only onto the same account.
+    private func enrich(_ primary: inout Txn, from other: Txn, sameRef: Bool) {
         let weak = primary.counterparty.isEmpty || primary.counterparty.contains("@") || primary.counterparty.hasPrefix("*")
         if weak, !other.counterparty.isEmpty, !other.counterparty.contains("@") {
             primary.counterparty = other.counterparty
+            // The merchant list renamed the confirmation to its own display name ("Gas" for "Indane Gas"), which no
+            // alias matches: say so, so the categoriser finds the merchant by that name.
+            if other.categorySource == .merchant && primary.categorySource == .none {
+                primary.categorySource = .merchant
+                primary.category = other.category
+            }
         }
-        if primary.vpa == nil { primary.vpa = other.vpa }
-        if primary.ref == nil { primary.ref = other.ref }
+        if sameRef || !primary.isPrimary {
+            if primary.vpa == nil { primary.vpa = other.vpa }
+            if primary.ref == nil { primary.ref = other.ref }
+        }
+        if primary.hint == .none, sameRef || (primary.last4 != nil && primary.last4 == other.last4) {
+            primary.hint = other.hint
+        }
     }
 
     // MARK: Categories
@@ -323,20 +378,34 @@ struct Ledger {
         let key = state.txns[i].counterpartyKey
         if remember && !key.isEmpty {
             state.rules[key] = Rule(key: key, category: category, label: label?.trimmed ?? state.txns[i].counterparty)
-            recategorize(onlyUnsorted: false)
+            recategorize(onlyUnsorted: false, key: key)
         }
     }
 
     mutating func removeRule(_ key: String) {
         state.rules[key] = nil
-        recategorize(onlyUnsorted: false)
+        recategorize(onlyUnsorted: false, key: key)
     }
 
     /// Runs the categoriser again. Never touches your own choices, nor web / Claude answers unless a rule now applies.
-    mutating func recategorize(onlyUnsorted: Bool) {
+    /// With `key` (a rule for that payee changed) only what the rule can change: that payee's payments, and masked
+    /// UPI IDs ("*iggy@icici") that may stand for one of its UPI IDs.
+    mutating func recategorize(onlyUnsorted: Bool, key: String? = nil) {
+        var fullIDs = Set<String>()
+        if let k = key {
+            if k.hasPrefix("vpa:") { fullIDs.insert(String(k.dropFirst(4))) }
+            for t in state.txns where t.counterpartyKey == k {
+                if let v = t.vpa?.lowercased() { fullIDs.insert(v) }
+            }
+        }
         let c = makeCategorizer()
         for i in state.txns.indices {
             let t = state.txns[i]
+            if let k = key, t.counterpartyKey != k {
+                guard let v = t.vpa?.lowercased(), v.hasPrefix("*"), v.count > 3 else { continue }
+                let tail = String(v.dropFirst())
+                if !fullIDs.contains(where: { !$0.hasPrefix("*") && $0.hasSuffix(tail) }) { continue }
+            }
             if t.categorySource == .user { continue }
             if onlyUnsorted && t.category != Category.uncategorized { continue }
             if t.categorySource == .web || t.categorySource == .claude {

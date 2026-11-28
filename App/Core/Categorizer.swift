@@ -15,12 +15,16 @@ final class MerchantDB {
 
     let entries: [Entry]
     private var aliases: [(alias: String, entry: Entry)] = []
+    /// Aliases of 6 characters or more with the spaces taken out ("bajajfinance"), longest first.
+    private var compactAliases: [(alias: String, entry: Entry)] = []
     private var vpaTokens: [(token: String, entry: Entry)] = []
     private var vpaExact: [String: Entry] = [:]
+    private var byName: [String: Entry] = [:]
 
     init(entries: [Entry]) {
         self.entries = entries
         for e in entries {
+            if byName[e.n] == nil { byName[e.n] = e }
             for a in e.a ?? [] {
                 let n = MerchantDB.normalize(a)
                 if !n.isEmpty { aliases.append((n, e)) }
@@ -41,6 +45,10 @@ final class MerchantDB {
             }
         }
         aliases.sort { $0.alias.count > $1.alias.count }
+        for (a, e) in aliases where a.count >= 6 {
+            compactAliases.append((a.replacingOccurrences(of: " ", with: ""), e))
+        }
+        compactAliases.sort { $0.alias.count > $1.alias.count }
         vpaTokens.sort { $0.token.count > $1.token.count }
     }
 
@@ -80,21 +88,57 @@ final class MerchantDB {
             if let e = vpaExact[v] { return e }
             let local = v.split(separator: "@").first.map(String.init) ?? v
             if !local.hasPrefix("*") {
-                for (t, e) in vpaTokens where local.contains(t) { return e }
+                for (t, e) in vpaTokens where MerchantDB.token(t, fits: local) { return e }
             }
         }
         if let n = name {
-            let padded = " " + MerchantDB.normalize(n) + " "
-            if padded.count > 2 {
+            let normalized = MerchantDB.normalize(n)
+            if !normalized.isEmpty {
+                let padded = " " + normalized + " "
                 for (a, e) in aliases where padded.contains(" " + a + " ") { return e }
-                // Bank SMS cut payee names at 25 characters: "AutoPay Bharat Connec", "Google India Digital Serv".
-                let compact = padded.replacingOccurrences(of: " ", with: "")
-                if compact.count >= 6 {
-                    for (a, e) in aliases where a.count >= 6 && compact.contains(a.replacingOccurrences(of: " ", with: "")) { return e }
-                }
+                // Names written as one word ("BAJAJFINANCE", "ZERODHABROKINGLIMITED"). The alias must be whole words of
+                // the name run together, so "KINGSTON" is not "gst on" and "PRAMOD MARTIN" is not DMart.
+                let runs = MerchantDB.joinedRuns(normalized)
+                for (a, e) in compactAliases where runs.contains(a) { return e }
             }
         }
         return nil
+    }
+
+    /// The entry shown under this display name ("Credit card bill").
+    func entry(named name: String) -> Entry? { byName[name] }
+
+    private static let gluedSuffixes = ["limited", "private", "india", "ltd", "pvt", "llp", "inc"]
+
+    /// Runs of up to six whole words joined without spaces, also with legal words glued on at the end taken off
+    /// ("zerodhabrokinglimited" -> "zerodhabroking").
+    private static func joinedRuns(_ normalized: String) -> Set<String> {
+        let words = normalized.split(separator: " ").map(String.init)
+        var out = Set<String>()
+        for i in words.indices {
+            var run = ""
+            for j in i..<min(words.count, i + 6) {
+                run += words[j]
+                var r = run
+                out.insert(r)
+                while let s = gluedSuffixes.first(where: { r.count > $0.count + 3 && r.hasSuffix($0) }) {
+                    r.removeLast(s.count)
+                    out.insert(r)
+                }
+            }
+        }
+        return out
+    }
+
+    /// A short UPI token must start the ID or follow a non-letter: "uber" fits "uber.rides", not "kuber.k".
+    private static func token(_ t: String, fits local: String) -> Bool {
+        if t.count >= 6 { return local.contains(t) }
+        var from = local.startIndex
+        while let r = local.range(of: t, range: from..<local.endIndex) {
+            if r.lowerBound == local.startIndex || !local[local.index(before: r.lowerBound)].isLetter { return true }
+            from = local.index(after: r.lowerBound)
+        }
+        return false
     }
 }
 
@@ -109,7 +153,7 @@ struct Categorization {
 }
 
 /// Decides a transaction's category without the network. Order: system hints (transfers, investments, cash,
-/// interest), your rules, bank mandate notices, the merchant list, earlier payments to the same (masked) UPI ID,
+/// interest), your rules, the merchant list and bank mandate notices, earlier payments to the same (masked) UPI ID,
 /// words in the payee's name; a person is left for the check-in with "People" suggested.
 struct Categorizer {
     var db: MerchantDB
@@ -149,22 +193,33 @@ struct Categorizer {
             return Categorization(category: r.category, source: .rule, displayName: r.label.isEmpty ? nil : r.label)
         }
 
-        // 3. Bank mandate notices ("Rs.614 will be deducted on 11/08 For AutoPay … Electricity Bill").
-        if t.direction == .debit {
-            for m in mandates {
-                guard let c = m.category, abs(m.amount - t.amount) < 0.01 else { continue }
-                if abs(m.due.timeIntervalSince(t.date)) <= 3 * 86400 {
-                    return Categorization(category: c, source: .hint, displayName: mandateName(m.purpose))
-                }
-            }
+        // The payee as the message named it. `counterparty` may show a merchant's, rule's or notice's name by now, and
+        // sorting by that name gives other answers ("Simpl Grocery" has the lender "simpl"). A name key keeps the original.
+        let fromKey = t.counterpartyKey.hasPrefix("name:")
+        let payee = fromKey ? String(t.counterpartyKey.dropFirst(5)) : t.counterparty
+
+        // 3. Merchant list: UPI ID, then name. A UPI ID key keeps no name, so a payment the list sorted before is
+        // known by the list's own name.
+        var merchant = db.match(name: nil, vpa: t.vpa)
+        if merchant == nil, !fromKey, t.categorySource == .merchant { merchant = db.entry(named: t.counterparty) }
+        if merchant == nil { merchant = db.match(name: payee, vpa: nil) ?? db.match(name: nil, vpa: resolved) }
+
+        // 4. Bank mandate notices ("Rs.614 will be deducted on 11/08 For AutoPay … Electricity Bill"), only for debits
+        // made under a mandate, nearest notice first. A notice does not rename another merchant, only the bill network
+        // its text names ("AutoPay Bharat Connect Electricity Bill").
+        if t.direction == .debit, let m = mandateNotice(for: t), let c = m.category,
+           merchant == nil || db.match(name: m.purpose, vpa: nil) == merchant {
+            return Categorization(category: c, source: .hint, displayName: mandateName(m.purpose))
         }
 
-        // 4. Merchant list.
-        if let e = db.match(name: t.counterparty, vpa: t.vpa) ?? db.match(name: nil, vpa: resolved) {
+        if let e = merchant {
             var cat = e.c
-            if t.direction == .credit {
-                let kind = categoryKinds[cat] ?? .expense
-                if kind == .expense { cat = Category.refunds }
+            if t.direction == .credit, (categoryKinds[cat] ?? .expense) == .expense {
+                // Money back from a shop. A lender's credit is a loan paid out and an insurer's is a payout.
+                if hint == .refund { cat = Category.refunds }
+                else if cat == "emi" { cat = Category.transfers }
+                else if cat == "insurance" { cat = Category.income }
+                else { cat = Category.refunds }
             }
             return Categorization(category: cat, source: .merchant, displayName: e.n)
         }
@@ -180,16 +235,38 @@ struct Categorizer {
             return Categorization(category: Category.income, source: .system, displayName: nil)
         }
 
-        // 6. A person, or words in a business's name.
-        let person = Categorizer.looksLikePerson(name: t.counterparty, vpa: t.vpa)
-        if person {
-            return Categorization(category: Category.uncategorized, source: .none, displayName: nil, isPerson: true, suggestion: Category.people)
-        }
-        if let c = Categorizer.keywordCategory(t.counterparty) {
+        // 6. Words in a business's name ("SRI SAI KIRANA" is a shop), then a person, then perhaps a web lookup.
+        if let c = Categorizer.keywordCategory(payee) {
             return Categorization(category: c, source: .heuristic, displayName: nil)
         }
-        let lookupable = Categorizer.isLookupable(name: t.counterparty, vpa: t.vpa)
+        if Categorizer.looksLikePerson(name: payee, vpa: t.vpa) {
+            return Categorization(category: Category.uncategorized, source: .none, displayName: nil, isPerson: true, suggestion: Category.people)
+        }
+        // A lookup sends the name shown, so it has to pass too.
+        let lookupable = Categorizer.isLookupable(name: payee, vpa: t.vpa) && Categorizer.isLookupable(name: t.counterparty, vpa: t.vpa)
         return Categorization(category: Category.uncategorized, source: .none, displayName: nil, wantsLookup: lookupable)
+    }
+
+    /// The nearest notice of the same amount within three days, for a debit made under a mandate.
+    private func mandateNotice(for t: Txn) -> MandateHint? {
+        guard !mandates.isEmpty, Categorizer.isMandateDebit(t) else { return nil }
+        var best: MandateHint?
+        var bestGap = Double.infinity
+        for m in mandates where m.category != nil && abs(m.amount - t.amount) < 0.01 {
+            let gap = abs(m.due.timeIntervalSince(t.date))
+            if gap <= 3 * 86400 && gap < bestGap {
+                best = m
+                bestGap = gap
+            }
+        }
+        return best
+    }
+
+    /// UPI AutoPay, NACH / ACH and card e-mandate debits say so ("UPI Mandate:", "ACH D-", "UMRN", "AutoPay").
+    private static let mandateWords = Rx(#"\b(mandate|autopay|auto pay|auto-pay|auto debit|auto-debit|nach|ach|ecs|umrn)\b"#)
+
+    static func isMandateDebit(_ t: Txn) -> Bool {
+        t.pattern == "upi-mandate" || t.pattern == "autopay-success" || mandateWords.test(t.raw)
     }
 
     /// "*iggy@icici" -> "upiswiggy@icici" when exactly one known UPI ID ends that way.
@@ -234,7 +311,7 @@ struct Categorizer {
         "fish", "juice", "tea", "coffee", "bar", "pub", "brewery", "wines", "ayurveda", "books", "stationery", "xerox", "printers",
         "hardware", "paints", "constructions", "builders", "developers", "properties", "realty", "estates", "rentals", "lodge",
         "residency", "inn", "resort", "hostel", "toys", "gifts", "flowers", "cakes", "icecream", "creamery", "pizza", "burger",
-        "chats", "chaat", "bhavan", "darshini", "sagar", "upahara", "tiffin", "mess", "canteen", "autopay", "bill", "bills",
+        "chats", "chaat", "upahara", "tiffin", "mess", "canteen", "autopay", "bill", "bills",
         "online", "digital", "media", "network", "systems", "global", "international", "ventures", "associates", "consultancy",
         "station", "parking", "toll", "metro", "airlines", "airways", "infotech", "infra", "pay", "upi",
     ]
@@ -243,24 +320,35 @@ struct Categorizer {
 
     /// UPI IDs used by shops' QR codes and payment gateways, not people.
     private static let merchantVPAMarkers = [
-        "paytm.", "paytmqr", "gpay-", "bharatpe", ".rzp", "rzp.", ".bqr", ".payu", "payu", "ecom", "upi", "store", "shop", "mart",
+        "paytm.", "paytm-", "paytmqr", "gpay-", "bharatpe", ".rzp", "rzp.", ".bqr", ".payu", "payu", "ecom", "upi", "store", "shop", "mart",
         "merchant", "razorpay", "cashfree", "billdesk", "phonepe.", "mswipe", "pinelabs", "ezetap", "yespay", "ibz", "q0", "bqr",
     ]
-    private static let merchantHandles = ["okbizaxis", "okbizaxi", "okbizicici", "ptys", "pty", "paytm", "rapl", "apl", "axb", "rzp", "pnb", "ikwik"]
+    /// Handles only businesses get (people's IDs end in @apl, @pnb, @ikwik, @paytm, @okaxis and so on).
+    private static let merchantHandles = ["okbizaxis", "okbizaxi", "okbizicici", "ptys", "pty", "rapl", "axb", "rzp"]
+
+    /// "9876543210", "919876543210", "9876543210-2": an ID made from a phone number.
+    private static func isPhoneNumber(_ local: String) -> Bool {
+        if local.filter({ $0.isNumber }).count == 10 && local.count <= 12 { return true }
+        return local.range(of: #"^(91)?[0-9]{10}([-._]?[0-9]{1,2})?$"#, options: .regularExpression) != nil
+    }
 
     static func looksLikePerson(name: String?, vpa: String?) -> Bool {
         if let v = vpa?.lowercased(), v.contains("@") {
-            let parts = v.split(separator: "@", maxSplits: 1).map(String.init)
+            let parts = v.split(separator: "@", maxSplits: 1, omittingEmptySubsequences: false).map(String.init)
             let local = parts[0]
             let handle = parts.count > 1 ? parts[1] : ""
-            if local.hasPrefix("*") { return false }      // masked: unknown
-            if local.filter({ $0.isNumber }).count == 10 && local.count <= 12 { return true } // phone number
-            if merchantVPAMarkers.contains(where: { local.contains($0) }) { return false }
-            if merchantHandles.contains(handle) { return false }
-            if local.range(of: #"^q\d{6,}"#, options: .regularExpression) != nil { return false } // PhonePe merchant QR
-            // "rahul123@okicici", "anita.k2@okicici": letters, optional dots and digits.
-            return local.range(of: #"^[a-z][a-z.]{2,}[0-9]{0,6}$"#, options: .regularExpression) != nil
-                || local.range(of: #"^[a-z]+[0-9]{1,4}[a-z]+[0-9]*$"#, options: .regularExpression) != nil
+            // A masked ID ("*esh@okaxis") says nothing either way.
+            if !local.hasPrefix("*") {
+                if isPhoneNumber(local) { return true }
+                if merchantVPAMarkers.contains(where: { local.contains($0) }) { return false }
+                if merchantHandles.contains(handle) { return false }
+                if local.range(of: #"^q\d{6,}"#, options: .regularExpression) != nil { return false } // PhonePe merchant QR
+                // "rahul123@okicici", "anita.k2@okicici": letters, optional dots and digits.
+                if local.range(of: #"^[a-z][a-z.]{2,}[0-9]{0,6}$"#, options: .regularExpression) != nil
+                    || local.range(of: #"^[a-z]+[0-9]{1,4}[a-z]+[0-9]*$"#, options: .regularExpression) != nil { return true }
+            }
+            // The ID does not settle it ("rk1990@", "ramesh_k@oksbi"): the name does, unless the name is the ID itself.
+            if name?.contains("@") ?? true { return false }
         }
         guard let n = name?.trimmed, !n.isEmpty else { return false }
         let words = MerchantDB.normalize(n).split(separator: " ").map(String.init)
@@ -272,10 +360,19 @@ struct Categorizer {
         return words.count >= 2
     }
 
+    /// Whether a payee's name may go to a web lookup or Claude: a business's name, never a person's.
     static func isLookupable(name: String?, vpa: String?) -> Bool {
         guard let n = name?.trimmed, n.count >= 3 else { return false }
         if n.contains("@") { return false }                  // a UPI ID tells the web nothing
         if n.filter({ $0.isLetter }).count < 3 { return false }
+        // Judged on the words a search sends: words with digits are left out of it.
+        let words = MerchantDB.normalize(n).split(separator: " ").map(String.init).filter { w in !w.contains(where: { $0.isNumber }) }
+        guard let first = words.first else { return false }
+        // One plain word ("MANJUNATHA", "Amma") is as likely a person's name as a shop's.
+        if words.count == 1 && !businessWords.contains(first) { return false }
+        // A UPI ID can show that a payee is a person, never that a named one is not.
+        if looksLikePerson(name: words.joined(separator: " "), vpa: nil) { return false }
+        if let v = vpa, looksLikePerson(name: nil, vpa: v) { return false }
         return true
     }
 
@@ -293,16 +390,30 @@ struct Categorizer {
         ("home", ["rentals", "properties", "realty", "estates", "builders", "developers", "constructions", "interiors", "furniture", "furnishing", "plywood", "maintenance", "apartment", "apartments", "owners association", "welfare association"]),
         ("shopping", ["fashion", "fashions", "garments", "textiles", "silks", "sarees", "jewellers", "jewellery", "jewelry", "footwear", "shoes", "electronics", "electricals", "mobiles", "mobile", "hardware", "paints", "stationery", "books", "gifts", "toys", "boutique", "collections", "watches", "lifestyle"]),
         ("insurance", ["insurance", "assurance"]),
-        ("emi", ["finance", "financial services", "capital", "loan", "loans", "credit"]),
+        // A card bill paid from the bank moves money; the card's purchases are the spending.
+        (Category.transfers, ["credit card", "card bill", "cc bill"]),
+        ("emi", ["finance", "financial services", "capital", "loan", "loans"]),
         ("entertainment", ["cinemas", "cinema", "theatre", "theater", "multiplex", "gaming", "games", "amusement", "bowling"]),
     ]
+    /// Loose words: they decide only when no other word does ("METRO SHOES" is a shoe shop, "SAI MOBILE STORE" a phone shop).
+    private static let looseKeywords: Set<String> = ["store", "stores", "mart", "general store", "general stores", "fresh", "metro", "power", "capital", "hotel"]
+    /// Keywords that are also people's names: they count only beside a business word ("SAGAR PATIL" is a person).
+    private static let nameKeywords: Set<String> = ["sagar", "darshini", "bhavan", "vidya", "seva", "beauty", "yoga"]
 
     static func keywordCategory(_ name: String?) -> String? {
         guard let n = name else { return nil }
-        let padded = " " + MerchantDB.normalize(n) + " "
-        for (cat, words) in keywordTable {
-            for w in words where padded.contains(" " + w + " ") { return cat }
+        let normalized = MerchantDB.normalize(n)
+        let padded = " " + normalized + " "
+        func hit(_ use: (String) -> Bool) -> String? {
+            for (category, list) in keywordTable {
+                for w in list where use(w) && padded.contains(" " + w + " ") { return category }
+            }
+            return nil
         }
-        return nil
+        if let c = hit({ !looseKeywords.contains($0) && !nameKeywords.contains($0) }) { return c }
+        if let c = hit({ looseKeywords.contains($0) }) { return c }
+        let words = normalized.split(separator: " ").map(String.init)
+        guard words.contains(where: { businessWords.contains($0) }) else { return nil }
+        return hit({ nameKeywords.contains($0) })
     }
 }

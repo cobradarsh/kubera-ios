@@ -150,7 +150,7 @@ struct MonthSwitcher: View {
             Spacer()
             VStack(spacing: 1) {
                 Text(Cal.monthTitleFormatter.string(from: month)).font(.system(.headline, design: .rounded))
-                Text("1st – \(Cal.daysInMonth(month))th").font(.caption2).foregroundColor(Theme.faint)
+                Text("\(MonthSwitcher.ordinal(1)) – \(MonthSwitcher.ordinal(Cal.daysInMonth(month)))").font(.caption2).foregroundColor(Theme.faint)
             }
             Spacer()
             Button { Haptic.tap(); month = Cal.addMonths(1, to: month) } label: {
@@ -159,6 +159,17 @@ struct MonthSwitcher: View {
             .disabled(Cal.sameMonth(month, Date()) || month > Date())
         }
         .foregroundColor(Theme.gold)
+    }
+
+    /// 1st, 2nd, 3rd, 4th … 11th, 12th, 13th … 21st, 22nd, 23rd … 31st.
+    static func ordinal(_ n: Int) -> String {
+        if (11...13).contains(n % 100) { return "\(n)th" }
+        switch n % 10 {
+        case 1: return "\(n)st"
+        case 2: return "\(n)nd"
+        case 3: return "\(n)rd"
+        default: return "\(n)th"
+        }
     }
 }
 

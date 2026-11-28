@@ -74,7 +74,7 @@ struct ExpensesView: View {
                             .frame(minHeight: 240)
                     }
                     .card()
-                    CategoryBreakdown(list: list)
+                    CategoryBreakdown(month: month, list: list)
                     RecentList(list: list)
                     AccountsStrip()
                 }
@@ -105,6 +105,7 @@ struct ExpensesView: View {
                 default: TransactionsView(filterCategory: v)
                 }
             }
+            .navigationDestination(for: CategoryMonth.self) { v in TransactionsView(filterCategory: v.category, month: v.month) }
             .navigationDestination(for: Txn.self) { t in TxnDetailView(txn: t) }
         }
     }
@@ -119,10 +120,13 @@ struct SummaryCard: View {
     var body: some View {
         let s = store.spend
         let spent = s.spent(list)
-        let prevSpent = s.spent(prev)
+        let isCurrent = Cal.sameMonth(month, Date())
+        // This month so far is set against last month up to the same day, not the whole of it.
+        let today = Cal.day(Date())
+        let prevSpent = s.spent(isCurrent ? prev.filter { Cal.day($0.date) <= today } : prev)
+        let prevLabel = isCurrent ? "by " + Cal.dayMonthFormatter.string(from: Cal.addMonths(-1, to: Date())) : "last month"
         let income = s.income(list)
         let invested = s.invested(list)
-        let isCurrent = Cal.sameMonth(month, Date())
         let daysGone = isCurrent ? max(1, Cal.day(Date())) : Cal.daysInMonth(month)
         let perDay = spent / Double(daysGone)
         let projected = isCurrent ? perDay * Double(Cal.daysInMonth(month)) : spent
@@ -143,7 +147,7 @@ struct SummaryCard: View {
                         Text(String(format: "%@%.0f%%", change >= 0 ? "▲ " : "▼ ", abs(change) * 100))
                             .font(.footnote.weight(.semibold))
                             .foregroundColor(change > 0 ? Theme.loss : Theme.profit)
-                        Text("vs \(Money.compact(prevSpent)) last month").font(.caption2).foregroundColor(Theme.faint)
+                        Text("vs \(Money.compact(prevSpent)) \(prevLabel)").font(.caption2).foregroundColor(Theme.faint)
                     }
                 }
             }
@@ -167,8 +171,15 @@ struct SummaryCard: View {
     }
 }
 
+/// One category's payments in one month (what a By category row opens).
+struct CategoryMonth: Hashable {
+    var category: String
+    var month: Date
+}
+
 struct CategoryBreakdown: View {
     @EnvironmentObject var store: Store
+    var month: Date
     var list: [Txn]
     var body: some View {
         let totals = store.spend.byCategory(list)
@@ -180,7 +191,7 @@ struct CategoryBreakdown: View {
             }
             ForEach(totals) { t in
                 let c = store.category(t.category)
-                NavigationLink(value: t.category) {
+                NavigationLink(value: CategoryMonth(category: t.category, month: month)) {
                     HStack(spacing: 12) {
                         CategoryIcon(category: c, size: 34)
                         VStack(alignment: .leading, spacing: 4) {

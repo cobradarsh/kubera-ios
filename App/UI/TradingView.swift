@@ -76,7 +76,7 @@ struct TradingView: View {
                 VStack(spacing: 14) {
                     MantraHeader()
                     MonthSwitcher(month: $month)
-                    PnLSummary(stats: stats)
+                    PnLSummary(stats: stats, month: month)
                     if !findings.isEmpty {
                         Button { sheet = .review } label: {
                             HStack {
@@ -206,7 +206,8 @@ struct TradingView: View {
         VStack(alignment: .leading, spacing: 6) {
             SectionTitle(title: "Days", trailing: "\(days.count) recorded")
             if days.isEmpty {
-                EmptyNote(symbol: "camera.viewfinder", title: "No P&L this month yet",
+                EmptyNote(symbol: "camera.viewfinder",
+                          title: Cal.sameMonth(month, Date()) ? "No P&L this month yet" : "No P&L in \(Cal.monthTitleFormatter.string(from: month))",
                           detail: "Take a screenshot of your positions after the market closes. Kubera finds it and reads the P&L.")
             }
             ForEach(days.sorted { $0.date > $1.date }) { d in
@@ -323,11 +324,13 @@ struct TradingView: View {
 
 struct PnLSummary: View {
     var stats: TradeStats
+    var month: Date = Date()
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             HStack(alignment: .firstTextBaseline) {
                 VStack(alignment: .leading, spacing: 2) {
-                    Text("Net P&L this month").font(.caption).foregroundColor(Theme.dim)
+                    Text(Cal.sameMonth(month, Date()) ? "Net P&L this month" : "Net P&L in \(Cal.monthTitleFormatter.string(from: month))")
+                        .font(.caption).foregroundColor(Theme.dim)
                     Text(Money.signed(stats.net))
                         .font(.system(size: 34, weight: .bold, design: .rounded))
                         .foregroundColor(Theme.pnl(stats.net))
