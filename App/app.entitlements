@@ -21,5 +21,23 @@
 	<true/>
 	<key>com.apple.private.security.storage.MessagesMetaData</key>
 	<true/>
+	<!-- An unsandboxed platform app may open only the IOKit drivers listed here. Without IOSurface, GPU and Neural
+	     Engine access, image buffers cannot be made, so on-device text recognition (Vision, Live Text) fails with
+	     "Failed to create CVPixelBuffer". Same list as Dopamine. -->
+	<key>com.apple.security.exception.iokit-user-client-class</key>
+	<array>
+		<string>IOSurfaceRoot</string>
+		<string>IOSurfaceRootUserClient</string>
+		<string>IOSurfaceSendRight</string>
+		<string>AGXDevice</string>
+		<string>AGXDeviceUserClient</string>
+		<string>AGXSharedUserClient</string>
+		<string>AGXGLContext</string>
+		<string>AGXCommandQueue</string>
+		<string>H11ANEInDirectPathClient</string>
+		<string>AppleJPEGDriverUserClient</string>
+		<string>IOMobileFramebuffer</string>
+		<string>IOMobileFramebufferUserClient</string>
+	</array>
 </dict>
 </plist>
